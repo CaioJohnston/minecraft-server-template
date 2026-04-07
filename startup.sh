@@ -28,12 +28,12 @@ err() {
 # ── Ensure dependencies ─────────────────────────────────────────────────────
 if ! command -v tmux &>/dev/null; then
   log "Installing tmux..."
-  apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1 || err "Failed to install tmux"
+  sudo apt-get update -qq && sudo apt-get install -y -qq tmux > /dev/null 2>&1 || err "Failed to install tmux"
 fi
 
 if ! command -v jq &>/dev/null; then
   log "Installing jq..."
-  apt-get install -y -qq jq > /dev/null 2>&1 || err "Failed to install jq"
+  sudo apt-get install -y -qq jq > /dev/null 2>&1 || err "Failed to install jq"
 fi
 
 if ! command -v java &>/dev/null; then
