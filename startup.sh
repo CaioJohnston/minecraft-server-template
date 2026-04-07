@@ -17,6 +17,9 @@ cd "$SERVER"
 
 log() { echo "[$(date '+%H:%M:%S')] [MINEHOST] $1" | tee -a "$LOG"; }
 
+# Ensure tmux and jq are installed                                                                                                                                                                 
+command -v tmux &>/dev/null || (apt-get update -qq && apt-get install -y -qq tmux >/dev/null 2>&1) || true
+command -v jq &>/dev/null || apt-get install -y -qq jq >/dev/null 2>&1 || true 
 # Ensure jq is installed
 command -v jq &>/dev/null || (apt-get update -qq && apt-get install -y -qq jq >/dev/null 2>&1) || true
 
