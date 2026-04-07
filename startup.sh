@@ -1,0 +1,173 @@
+#!/bin/bash
+# MineHost — Minecraft Server Startup Script
+# Runs inside the GitHub Codespace on startup
+set -euo pipefail
+
+SERVER="/workspace/server"
+LOG="$SERVER/server.log"
+CONF="$SERVER/minehost.json"
+CONTROL="/workspace/control-server.js"
+
+mkdir -p "$SERVER"
+cd "$SERVER"
+
+log() { echo "[$(date '+%H:%M:%S')] [MINEHOST] $1" | tee -a "$LOG"; }
+
+# Ensure jq is installed
+command -v jq &>/dev/null || (apt-get update -qq && apt-get install -y -qq jq >/dev/null 2>&1) || true
+
+# Read configuration
+if [ -f "$CONF" ]; then
+  TYPE=$(jq -r '.type // "vanilla"' "$CONF")
+  VER=$(jq -r '.version // "latest"' "$CONF")
+  JVM=$(jq -r '.jvmArgs // "-Xmx2048m -Xms1024m"' "$CONF")
+else
+  TYPE="vanilla"
+  VER="latest"
+  JVM="-Xmx2048m -Xms1024m"
+fi
+
+log "Preparing $TYPE server (version: $VER)"
+
+# Kill leftover tmux sessions
+tmux kill-session -t mc 2>/dev/null || true
+
+# ────────────────────────────────────────
+# Download server JAR
+# ────────────────────────────────────────
+
+case "$TYPE" in
+  vanilla)
+    MANIFEST=$(curl -sL "https://launchermeta.mojang.com/mc/game/version_manifest.json")
+    if [ "$VER" = "latest" ]; then
+      VER_ID=$(echo "$MANIFEST" | jq -r '.latest.release')
+    else
+      VER_ID="$VER"
+    fi
+    VER_URL=$(echo "$MANIFEST" | jq -r --arg v "$VER_ID" '.versions[] | select(.id == $v) | .url' | head -1)
+    if [ -z "$VER_URL" ] || [ "$VER_URL" = "null" ]; then
+      log "ERROR: Could not find Vanilla $VER_ID in manifest"
+      exit 1
+    fi
+    JAR="$(curl -sL "$VER_URL" | jq -r '.downloads.server.url')"
+    SHA="$(curl -sL "$VER_URL" | jq -r '.downloads.server.sha1')"
+    curl -sL -o server.jar "$JAR"
+    JAR_NAME="server.jar"
+    log "Downloaded Vanilla $VER_ID"
+    ;;
+
+  paper)
+    API="https://api.papermc.io/v2/projects/paper"
+    if [ "$VER" = "latest" ]; then
+      LVER=$(curl -sL "$API/versions" | jq -r '.versions[-1]')
+    else
+      LVER="$VER"
+    fi
+    BNUM=$(curl -sL "$API/versions/$LVER/builds" | jq -r '.builds[-1].build')
+    JNAME=$(curl -sL "$API/versions/$LVER/builds/$BNUM" | jq -r '.downloads.application.name')
+    curl -sL -o paper.jar "$API/versions/$LVER/builds/$BNUM/downloads/$JNAME"
+    JAR_NAME="paper.jar"
+    log "Downloaded Paper $LVER build #$BNUM"
+    ;;
+
+  fabric)
+    FAPI="https://meta.fabricmc.net/v2"
+    if [ "$VER" = "latest" ]; then
+      VER=$(curl -sL "$FAPI/versions/game?limit=1" | jq -r '.[0].version')
+    fi
+    LOADER=$(curl -sL "$FAPI/versions/$VER" | jq -r '.[0].loader.version')
+    log "Installing Fabric $VER with loader $LOADER"
+
+    # Download fabric-installer.jar from official source
+    curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
+
+    java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction 2>&1 | tee -a "$LOG"
+
+    JAR_NAME="fabric-server-launch.jar"
+    rm -f fabric-installer.jar 2>/dev/null || true
+    log "Fabric $VER installed"
+    ;;
+
+  forge)
+    if [ "$VER" = "latest" ]; then
+      MC_VER=$(curl -sL "https://launchermeta.mojang.com/mc/game/version_manifest.json" | jq -r '.latest.release')
+    else
+      MC_VER="$VER"
+    fi
+    log "Installing Forge for Minecraft $MC_VER"
+
+    # Fetch latest Forge version from Maven
+    # Forge versions are like "1.20.4-49.0.50"
+    MCDATA=$(curl -sL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
+    forge_ver=$(echo "$MCDATA" | grep "<latest>" | head -1 | sed 's/.*<latest>\(.*\)<\/latest>.*/\1/')
+
+    if [ -z "$forge_ver" ] || [ "$forge_ver" = "null" ]; then
+      log "ERROR: Could not find Forge installer. Check https://files.minecraftforge.net"
+      exit 1
+    fi
+
+    curl -sL -o forge-installer.jar "https://maven.minecraftforge.net/net/minecraftforge/forge/$forge_ver/forge-$forge_ver-installer.jar"
+    java -jar forge-installer.jar --installServer 2>&1 | tee -a "$LOG"
+    rm -f forge-installer.jar 2>/dev/null || true
+    JAR_NAME="run.sh"
+    chmod +x "$JAR_NAME" 2>/dev/null || true
+    log "Forge $forge_ver installed"
+    ;;
+
+  *)
+    log "ERROR: Unknown server type: $TYPE"
+    exit 1
+    ;;
+esac
+
+# ────────────────────────────────────────
+# Accept EULA
+# ────────────────────────────────────────
+echo "eula=true" > eula.txt
+
+# ────────────────────────────────────────
+# Start server in tmux session
+# ────────────────────────────────────────
+FIRST_RUN=false
+if [ ! -d "world" ] && [ "$JAR_NAME" != "run.sh" ]; then
+  FIRST_RUN=true
+  log "First run — generating world, then restarting..."
+fi
+
+if [ "$JAR_NAME" = "run.sh" ]; then
+  CMD="bash $JAR_NAME 2>&1 | tee -a $LOG"
+else
+  CMD="java $JVM -jar $JAR_NAME nogui 2>&1 | tee -a $LOG"
+fi
+
+tmux new-session -d -s mc "$CMD"
+
+# If first run, let it generate, then restart to get clean state
+if [ "$FIRST_RUN" = true ]; then
+  for i in $(seq 1 20); do
+    if grep -q "Done" "$LOG" 2>/dev/null || grep -q "Complete" "$LOG" 2>/dev/null; then
+      break
+    fi
+    sleep 2
+  done
+  tmux send-keys -t mc "stop" C-m
+  sleep 5
+  tmux kill-session -t mc
+  log "World generation complete — restarting server"
+  tmux new-session -d -s mc "$CMD"
+fi
+
+sleep 2
+log "Server started — tmux session: mc"
+
+# ────────────────────────────────────────
+# Start control server (port 8081)
+# ────────────────────────────────────────
+if command -v node &>/dev/null; then
+  chmod +x "$CONTROL" 2>/dev/null || true
+  node "$CONTROL" >> "$LOG" 2>&1 &
+  log "Control server started on :8081"
+fi
+
+# Keep the script alive — it runs in tmux's postStartCommand
+wait 2>/dev/null || tail -f "$LOG"
