@@ -8,7 +8,8 @@ const path = require("path");
 const { execSync } = require("child_process");
 
 const PORT = 8081;
-const SERVER_DIR = process.env.SERVER_DIR || "/workspace/server";
+const SCRIPT_DIR = path.dirname(path.resolve(__filename));
+const SERVER_DIR = process.env.SERVER_DIR || path.join(SCRIPT_DIR, "server");
 const LOG_FILE = path.join(SERVER_DIR, "server.log");
 const CONFIG_FILE = path.join(SERVER_DIR, "minehost.json");
 
