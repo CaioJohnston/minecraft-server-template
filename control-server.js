@@ -161,6 +161,37 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /sse — Server-Sent Events for live log streaming
+  if (url.pathname === "/sse" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+    });
+
+    let lastIndex = lastLogLineCount;
+
+    const sendInterval = setInterval(() => {
+      if (!fs.existsSync(LOG_FILE)) return;
+      const content = fs.readFileSync(LOG_FILE, "utf8");
+      const lines = content.split("\n").filter((l) => l.length > 0);
+      if (lines.length > lastIndex) {
+        const newLines = lines.slice(lastIndex).join("\n");
+        res.write(`data: ${JSON.stringify(newLines)}\n\n`);
+        lastIndex = lines.length;
+      }
+    }, 500);
+
+    req.on("close", () => {
+      clearInterval(sendInterval);
+      console.log("[control] SSE client disconnected");
+    });
+
+    console.log("[control] SSE client connected");
+    return;
+  }
+
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Not found" }));
 });
