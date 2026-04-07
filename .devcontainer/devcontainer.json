@@ -8,7 +8,7 @@
       "installGradle": false
     },
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "20"
+      "version": "25"
     }
   },
   "postStartCommand": "bash /workspaces/minecraft-server-template/startup.sh",
