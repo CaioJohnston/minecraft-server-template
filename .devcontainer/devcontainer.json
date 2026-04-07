@@ -11,7 +11,7 @@
       "version": "20"
     }
   },
-  "postStartCommand": "bash /workspace/startup.sh",
+  "postStartCommand": "bash /workspaces/minecraft-server-template/startup.sh",
   "forwardPorts": [25565, 8081],
   "portsAttributes": {
     "25565": {
