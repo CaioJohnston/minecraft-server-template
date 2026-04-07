@@ -1,9 +1,8 @@
 #!/bin/bash
 # MineHost — Minecraft Server Startup Script
 # Runs inside the GitHub Codespace on startup
-set -euo pipefail
 
-# Detect script directory (works in both /workspace/ and /workspaces/repo/)
+# Detect script directory (works anywhere)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Server data lives as sibling to the script
@@ -15,15 +14,42 @@ CONTROL="$SCRIPT_DIR/control-server.js"
 mkdir -p "$SERVER"
 cd "$SERVER"
 
-log() { echo "[$(date '+%H:%M:%S')] [MINEHOST] $1" | tee -a "$LOG"; }
+log() {
+  local msg="[$(date '+%H:%M:%S')] [MINEHOST] $1"
+  echo "$msg" >> "$LOG"
+  echo "$msg"
+}
+err() {
+  local msg="[$(date '+%H:%M:%S')] [MINEHOST] ERROR: $1"
+  echo "$msg" >> "$LOG"
+  echo "$msg" >&2
+}
 
-# Ensure tmux and jq are installed                                                                                                                                                                 
-command -v tmux &>/dev/null || (apt-get update -qq && apt-get install -y -qq tmux >/dev/null 2>&1) || true
-command -v jq &>/dev/null || apt-get install -y -qq jq >/dev/null 2>&1 || true 
-# Ensure jq is installed
-command -v jq &>/dev/null || (apt-get update -qq && apt-get install -y -qq jq >/dev/null 2>&1) || true
+# ── Ensure dependencies ─────────────────────────────────────────────────────
+if ! command -v tmux &>/dev/null; then
+  log "Installing tmux..."
+  apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1 || err "Failed to install tmux"
+fi
 
-# Read configuration
+if ! command -v jq &>/dev/null; then
+  log "Installing jq..."
+  apt-get install -y -qq jq > /dev/null 2>&1 || err "Failed to install jq"
+fi
+
+if ! command -v java &>/dev/null; then
+  err "Java is not installed"
+  exit 1
+fi
+
+if ! command -v node &>/dev/null; then
+  err "Node.js is not installed"
+  exit 1
+fi
+
+log "Java: $(java -version 2>&1 | head -1)"
+log "Node: $(node --version)"
+
+# ── Read configuration ──────────────────────────────────────────────────────
 if [ -f "$CONF" ]; then
   TYPE=$(jq -r '.type // "vanilla"' "$CONF")
   VER=$(jq -r '.version // "latest"' "$CONF")
@@ -53,11 +79,10 @@ case "$TYPE" in
     fi
     VER_URL=$(echo "$MANIFEST" | jq -r --arg v "$VER_ID" '.versions[] | select(.id == $v) | .url' | head -1)
     if [ -z "$VER_URL" ] || [ "$VER_URL" = "null" ]; then
-      log "ERROR: Could not find Vanilla $VER_ID in manifest"
+      err "Could not find Vanilla $VER_ID in manifest"
       exit 1
     fi
-    JAR="$(curl -sL "$VER_URL" | jq -r '.downloads.server.url')"
-    SHA="$(curl -sL "$VER_URL" | jq -r '.downloads.server.sha1')"
+    JAR=$(curl -sL "$VER_URL" | jq -r '.downloads.server.url')
     curl -sL -o server.jar "$JAR"
     JAR_NAME="server.jar"
     log "Downloaded Vanilla $VER_ID"
@@ -84,11 +109,8 @@ case "$TYPE" in
     fi
     LOADER=$(curl -sL "$FAPI/versions/$VER" | jq -r '.[0].loader.version')
     log "Installing Fabric $VER with loader $LOADER"
-
     curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
-
-    java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction 2>&1 | tee -a "$LOG"
-
+    java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction >> "$LOG" 2>&1
     JAR_NAME="fabric-server-launch.jar"
     rm -f fabric-installer.jar 2>/dev/null || true
     log "Fabric $VER installed"
@@ -101,17 +123,14 @@ case "$TYPE" in
       MC_VER="$VER"
     fi
     log "Installing Forge for Minecraft $MC_VER"
-
     MCDATA=$(curl -sL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
     forge_ver=$(echo "$MCDATA" | grep "<latest>" | head -1 | sed 's/.*<latest>\(.*\)<\/latest>.*/\1/')
-
     if [ -z "$forge_ver" ] || [ "$forge_ver" = "null" ]; then
-      log "ERROR: Could not find Forge installer. Check https://files.minecraftforge.net"
+      err "Could not find Forge installer"
       exit 1
     fi
-
     curl -sL -o forge-installer.jar "https://maven.minecraftforge.net/net/minecraftforge/forge/$forge_ver/forge-$forge_ver-installer.jar"
-    java -jar forge-installer.jar --installServer 2>&1 | tee -a "$LOG"
+    java -jar forge-installer.jar --installServer >> "$LOG" 2>&1
     rm -f forge-installer.jar 2>/dev/null || true
     JAR_NAME="run.sh"
     chmod +x "$JAR_NAME" 2>/dev/null || true
@@ -119,58 +138,58 @@ case "$TYPE" in
     ;;
 
   *)
-    log "ERROR: Unknown server type: $TYPE"
+    err "Unknown server type: $TYPE"
     exit 1
     ;;
 esac
 
-# ────────────────────────────────────────
-# Accept EULA
-# ────────────────────────────────────────
+# ── Accept EULA ─────────────────────────────────────────────────────────────
 echo "eula=true" > eula.txt
 
-# ────────────────────────────────────────
-# Start server in tmux session
-# ────────────────────────────────────────
+# ── Start server in tmux session ─────────────────────────────────────────────
 FIRST_RUN=false
 if [ ! -d "world" ] && [ "$JAR_NAME" != "run.sh" ]; then
   FIRST_RUN=true
-  log "First run — generating world, then restarting..."
+  log "First run — generating world..."
 fi
 
 if [ "$JAR_NAME" = "run.sh" ]; then
-  CMD="bash $JAR_NAME 2>&1 | tee -a $LOG"
+  CMD="bash $JAR_NAME >> $LOG 2>&1"
 else
-  CMD="java $JVM -jar $JAR_NAME nogui 2>&1 | tee -a $LOG"
+  CMD="java $JVM -jar $JAR_NAME nogui >> $LOG 2>&1"
 fi
 
-tmux new-session -d -s mc "$CMD"
+tmux new-session -d -s mc "$CMD" || { err "Failed to create tmux session"; exit 1; }
 
 if [ "$FIRST_RUN" = true ]; then
-  for i in $(seq 1 20); do
+  for i in $(seq 1 30); do
+    sleep 2
     if grep -q "Done" "$LOG" 2>/dev/null || grep -q "Complete" "$LOG" 2>/dev/null; then
       break
     fi
-    sleep 2
   done
-  tmux send-keys -t mc "stop" C-m
+  tmux send-keys -t mc "stop" C-m 2>/dev/null || true
   sleep 5
-  tmux kill-session -t mc
+  tmux kill-session -t mc 2>/dev/null || true
   log "World generation complete — restarting server"
-  tmux new-session -d -s mc "$CMD"
+  tmux new-session -d -s mc "$CMD" || { err "Failed to restart tmux session"; exit 1; }
 fi
 
 sleep 2
 log "Server started — tmux session: mc"
 
-# ────────────────────────────────────────
-# Start control server (port 8081)
-# ────────────────────────────────────────
-if command -v node &>/dev/null; then
-  chmod +x "$CONTROL" 2>/dev/null || true
-  node "$CONTROL" >> "$LOG" 2>&1 &
-  log "Control server started on :8081"
-fi
+# ── Start control server (port 8081) ─────────────────────────────────────────
+log "Starting control server on :8081..."
+node "$CONTROL" 2>&1 &
 
-# Keep the script alive — it runs in tmux's postStartCommand
-wait 2>/dev/null || tail -f "$LOG"
+# Wait for control server to respond
+for i in $(seq 1 15); do
+  if curl -s http://localhost:8081/status > /dev/null 2>&1; then
+    log "Control server is up and responding"
+    break
+  fi
+  sleep 1
+done
+
+# Keep script alive
+tail -f "$LOG"

@@ -3,12 +3,12 @@
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
   "features": {
     "ghcr.io/devcontainers/features/java:1": {
-      "version": "21",
+      "version": "25",
       "installMaven": false,
       "installGradle": false
     },
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "25"
+      "version": "20"
     }
   },
   "postStartCommand": "bash /workspaces/minecraft-server-template/startup.sh",
@@ -16,11 +16,13 @@
   "portsAttributes": {
     "25565": {
       "label": "Minecraft Server",
-      "onAutoForward": "silent"
+      "onAutoForward": "silent",
+      "visibility": "private"
     },
     "8081": {
       "label": "MineHost Console API",
-      "onAutoForward": "silent"
+      "onAutoForward": "silent",
+      "visibility": "private"
     }
   },
   "customizations": {
