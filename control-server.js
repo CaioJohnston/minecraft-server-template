@@ -6,19 +6,15 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
-const WebSocket = require("ws");
 
 const PORT = 8081;
 const SERVER_DIR = process.env.SERVER_DIR || "/workspace/server";
 const LOG_FILE = path.join(SERVER_DIR, "server.log");
 const CONFIG_FILE = path.join(SERVER_DIR, "minehost.json");
 
-// ── ws (WebSocket) ──────────────────────────────────────────────────────────
-
-const wss = new WebSocket.Server({ noServer: true });
+// ── Utility functions ───────────────────────────────────────────────────────
 
 function sendToConsole(text) {
-  // Send a command to the Minecraft server console via tmux
   try {
     execSync(`tmux send-keys -t mc ${JSON.stringify(text)} C-m`, {
       timeout: 2000,
@@ -58,11 +54,12 @@ function setConfig(obj) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(obj, null, 2));
 }
 
-// ── WebSocket connections (console streaming) ───────────────────────────────
+// ── WebSocket ───────────────────────────────────────────────────────────────
 
+const wss = { upgrade: null, on: null }; // Will be initialized after ws is installed
 let consoleClients = new Set();
 
-// Periodically poll tmux for new console output and broadcast
+// Periodically poll for new console output and broadcast
 let lastLogLineCount = 0;
 
 function checkNewOutput() {
@@ -73,7 +70,7 @@ function checkNewOutput() {
     const newLines = lines.slice(lastLogLineCount);
     const text = newLines.join("\n") + "\n";
     for (const client of consoleClients) {
-      if (client.readyState === WebSocket.OPEN) {
+      if (client.readyState === 1 /* WebSocket.OPEN */) {
         client.send(JSON.stringify({ type: "log", data: text }));
       }
     }
@@ -86,9 +83,8 @@ setInterval(checkNewOutput, 500);
 // ── HTTP Server ─────────────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
-  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
@@ -197,36 +193,18 @@ const server = http.createServer((req, res) => {
 });
 
 // ── WebSocket Upgrade ───────────────────────────────────────────────────────
+// (only if ws is installed)
 
 server.on("upgrade", (request, socket, head) => {
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit("connection", ws, request);
-  });
-});
-
-wss.on("connection", (ws) => {
-  console.log("[control] WebSocket client connected");
-  consoleClients.add(ws);
-
-  // Send recent log on connect
-  const recent = getLastLines(50);
-  if (recent.length > 0) {
-    ws.send(JSON.stringify({ type: "log", data: recent.join("\n") + "\n" }));
+  try {
+    const WebSocket = require("ws");
+    const _wss = new WebSocket.Server({ noServer: true });
+    _wss.handleUpgrade(request, socket, head, (ws) => {
+      _wss.emit("connection", ws, request);
+    });
+  } catch (e) {
+    socket.destroy();
   }
-
-  ws.on("message", (data) => {
-    try {
-      const msg = JSON.parse(data.toString());
-      if (msg.type === "cmd" && msg.command) {
-        sendToConsole(msg.command);
-      }
-    } catch {}
-  });
-
-  ws.on("close", () => {
-    console.log("[control] WebSocket client disconnected");
-    consoleClients.delete(ws);
-  });
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
@@ -236,7 +214,38 @@ try {
   require.resolve("ws");
 } catch {
   console.log("[control] Installing ws package...");
-  require("child_process").execSync("npm install ws", { cwd: "/workspace", stdio: "inherit" });
+  require("child_process").execSync("npm install ws", { cwd: "/workspaces/minecraft-server-template", stdio: "inherit" });
+}
+
+// Now that ws is available, set up WebSocket server
+try {
+  const WebSocket = require("ws");
+  const _wss = new WebSocket.Server({ server });
+  _wss.on("connection", (ws) => {
+    console.log("[control] WebSocket client connected");
+    consoleClients.add(ws);
+
+    const recent = getLastLines(50);
+    if (recent.length > 0) {
+      ws.send(JSON.stringify({ type: "log", data: recent.join("\n") + "\n" }));
+    }
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "cmd" && msg.command) {
+          sendToConsole(msg.command);
+        }
+      } catch {}
+    });
+
+    ws.on("close", () => {
+      console.log("[control] WebSocket client disconnected");
+      consoleClients.delete(ws);
+    });
+  });
+} catch (e) {
+  console.log("[control] WebSocket not available — running HTTP-only");
 }
 
 server.listen(PORT, "0.0.0.0", () => {
