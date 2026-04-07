@@ -3,10 +3,14 @@
 # Runs inside the GitHub Codespace on startup
 set -euo pipefail
 
-SERVER="/workspace/server"
+# Detect script directory (works in both /workspace/ and /workspaces/repo/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Server data lives as sibling to the script
+SERVER="$SCRIPT_DIR/server"
 LOG="$SERVER/server.log"
 CONF="$SERVER/minehost.json"
-CONTROL="/workspace/control-server.js"
+CONTROL="$SCRIPT_DIR/control-server.js"
 
 mkdir -p "$SERVER"
 cd "$SERVER"
@@ -78,7 +82,6 @@ case "$TYPE" in
     LOADER=$(curl -sL "$FAPI/versions/$VER" | jq -r '.[0].loader.version')
     log "Installing Fabric $VER with loader $LOADER"
 
-    # Download fabric-installer.jar from official source
     curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
 
     java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction 2>&1 | tee -a "$LOG"
@@ -96,8 +99,6 @@ case "$TYPE" in
     fi
     log "Installing Forge for Minecraft $MC_VER"
 
-    # Fetch latest Forge version from Maven
-    # Forge versions are like "1.20.4-49.0.50"
     MCDATA=$(curl -sL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
     forge_ver=$(echo "$MCDATA" | grep "<latest>" | head -1 | sed 's/.*<latest>\(.*\)<\/latest>.*/\1/')
 
@@ -142,7 +143,6 @@ fi
 
 tmux new-session -d -s mc "$CMD"
 
-# If first run, let it generate, then restart to get clean state
 if [ "$FIRST_RUN" = true ]; then
   for i in $(seq 1 20); do
     if grep -q "Done" "$LOG" 2>/dev/null || grep -q "Complete" "$LOG" 2>/dev/null; then
