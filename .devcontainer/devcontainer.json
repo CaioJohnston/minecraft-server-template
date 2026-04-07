@@ -17,12 +17,12 @@
     "25565": {
       "label": "Minecraft Server",
       "onAutoForward": "silent",
-      "visibility": "private"
+      "visibility": "public"
     },
     "8081": {
       "label": "MineHost Console API",
       "onAutoForward": "silent",
-      "visibility": "private"
+      "visibility": "public"
     }
   },
   "customizations": {
