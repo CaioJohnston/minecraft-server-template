@@ -263,3 +263,85 @@ try {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[control] MineHost control server listening on :${PORT}`);
 });
+
+// ── Gist-based communication (replaces port forwarding) ─────────────────────
+
+const GIST_ID = process.env.MINEHOST_GIST_ID;
+const MINEHOST_TOKEN = process.env.MINEHOST_TOKEN;
+let lastHandledCmd = null;
+
+function gistRequest(method, body, cb) {
+  const https = require("https");
+  const payload = body ? JSON.stringify(body) : null;
+  const req = https.request(
+    {
+      hostname: "api.github.com",
+      path: `/gists/${GIST_ID}`,
+      method,
+      headers: {
+        Authorization: `Bearer ${MINEHOST_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "minehost-control-server/1.0",
+        "Content-Type": "application/json",
+        ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+      },
+    },
+    (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => { try { cb && cb(JSON.parse(data)); } catch { cb && cb(null); } });
+    }
+  );
+  req.on("error", () => cb && cb(null));
+  if (payload) req.write(payload);
+  req.end();
+}
+
+function pushGistState() {
+  if (!GIST_ID || !MINEHOST_TOKEN) return;
+  const log = getLastLines(500);
+  const state = {
+    running: getServerRunning(),
+    log,
+    cursor: log.length,
+    pending_cmd: null,
+    updated: Date.now(),
+  };
+  // Read current pending_cmd before overwriting, so we don't clear it accidentally
+  gistRequest("GET", null, (current) => {
+    if (current?.files?.["state.json"]?.content) {
+      try {
+        const cur = JSON.parse(current.files["state.json"].content);
+        state.pending_cmd = cur.pending_cmd ?? null;
+      } catch {}
+    }
+    gistRequest("PATCH", { files: { "state.json": { content: JSON.stringify(state) } } }, null);
+  });
+}
+
+function pollPendingCmd() {
+  if (!GIST_ID || !MINEHOST_TOKEN) return;
+  gistRequest("GET", null, (data) => {
+    if (!data?.files?.["state.json"]?.content) return;
+    try {
+      const state = JSON.parse(data.files["state.json"].content);
+      const cmd = state.pending_cmd;
+      if (cmd && cmd !== lastHandledCmd) {
+        lastHandledCmd = cmd;
+        sendToConsole(cmd);
+        // Clear pending_cmd
+        state.pending_cmd = null;
+        gistRequest("PATCH", { files: { "state.json": { content: JSON.stringify(state) } } }, null);
+      }
+    } catch {}
+  });
+}
+
+if (GIST_ID && MINEHOST_TOKEN) {
+  console.log(`[control] Gist sync enabled: ${GIST_ID}`);
+  setInterval(pushGistState, 3000);
+  setInterval(pollPendingCmd, 3000);
+} else {
+  console.log("[control] No MINEHOST_GIST_ID/MINEHOST_TOKEN — gist sync disabled");
+}
