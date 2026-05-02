@@ -55,9 +55,10 @@ if [ -f "$CONF" ]; then
   VER=$(jq -r '.version // "latest"' "$CONF")
   JVM=$(jq -r '.jvmArgs // "-Xmx2048m -Xms1024m"' "$CONF")
 else
-  TYPE="vanilla"
-  VER="latest"
-  JVM="-Xmx2048m -Xms1024m"
+  TYPE="${MINEHOST_TYPE:-vanilla}"
+  VER="${MINEHOST_VERSION:-latest}"
+  JVM="${MINEHOST_JVM:--Xmx2048m -Xms1024m}"
+  printf '{"type":"%s","version":"%s","jvmArgs":"%s"}\n' "$TYPE" "$VER" "$JVM" > "$CONF"
 fi
 
 log "Preparing $TYPE server (version: $VER)"
