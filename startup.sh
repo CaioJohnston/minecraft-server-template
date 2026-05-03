@@ -25,6 +25,36 @@ err() {
   echo "$msg" >&2
 }
 
+# Returns required Java major version for a given MC version string (e.g. "1.20.1")
+mc_java_ver() {
+  local minor patch
+  minor=$(echo "$1" | cut -d. -f2)
+  patch=$(echo "$1" | cut -d. -f3)
+  if [ "$minor" -ge 21 ] || { [ "$minor" -eq 20 ] && [ "${patch:-0}" -ge 5 ]; }; then
+    echo "21"
+  elif [ "$minor" -ge 17 ]; then
+    echo "17"
+  else
+    echo "8"
+  fi
+}
+
+# Ensures Java <ver> is installed; returns path to its binary
+require_java() {
+  local need="$1"
+  local current_major bin
+  current_major=$(java -version 2>&1 | grep -oP '(?<=version ")\d+' | head -1)
+  if [ "$current_major" = "$need" ]; then echo "java"; return; fi
+  bin=$(find /usr/lib/jvm -maxdepth 3 -name "java" 2>/dev/null | grep -- "-${need}-" | head -1)
+  if [ -z "$bin" ]; then
+    log "Java $current_major present but Java $need required — installing openjdk-${need}-jdk..."
+    sudo apt-get install -y -qq "openjdk-${need}-jdk" > /dev/null 2>&1 \
+      || { err "Failed to install Java $need — using default Java (may fail)"; echo "java"; return; }
+    bin=$(find /usr/lib/jvm -maxdepth 3 -name "java" 2>/dev/null | grep -- "-${need}-" | head -1)
+  fi
+  echo "${bin:-java}"
+}
+
 # ── Ensure dependencies ─────────────────────────────────────────────────────
 if ! command -v tmux &>/dev/null; then
   log "Installing tmux..."
@@ -66,6 +96,9 @@ log "Preparing $TYPE server (version: $VER)"
 # Kill leftover tmux sessions
 tmux kill-session -t mc 2>/dev/null || true
 
+JAVA_CMD="java"
+JAVA_MC_VER=""
+
 # ────────────────────────────────────────
 # Download server JAR
 # ────────────────────────────────────────
@@ -86,6 +119,7 @@ case "$TYPE" in
     JAR=$(curl -sL "$VER_URL" | jq -r '.downloads.server.url')
     curl -sL -o server.jar "$JAR"
     JAR_NAME="server.jar"
+    JAVA_MC_VER="$VER_ID"
     log "Downloaded Vanilla $VER_ID"
     ;;
 
@@ -100,6 +134,7 @@ case "$TYPE" in
     JNAME=$(curl -sL "$API/versions/$LVER/builds/$BNUM" | jq -r '.downloads.application.name')
     curl -sL -o paper.jar "$API/versions/$LVER/builds/$BNUM/downloads/$JNAME"
     JAR_NAME="paper.jar"
+    JAVA_MC_VER="$LVER"
     log "Downloaded Paper $LVER build #$BNUM"
     ;;
 
@@ -113,6 +148,7 @@ case "$TYPE" in
     curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
     java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction >> "$LOG" 2>&1
     JAR_NAME="fabric-server-launch.jar"
+    JAVA_MC_VER="$VER"
     rm -f fabric-installer.jar 2>/dev/null || true
     log "Fabric $VER installed"
     ;;
@@ -124,6 +160,9 @@ case "$TYPE" in
       MC_VER="$VER"
     fi
     log "Installing Forge for Minecraft $MC_VER"
+    JAVA_CMD=$(require_java "$(mc_java_ver "$MC_VER")")
+    JAVA_MC_VER="$MC_VER"
+    log "Using Java $(mc_java_ver "$MC_VER") for Forge ($JAVA_CMD)"
     MCDATA=$(curl -sL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
     forge_ver=$(echo "$MCDATA" | grep "<latest>" | head -1 | sed 's/.*<latest>\(.*\)<\/latest>.*/\1/')
     if [ -z "$forge_ver" ] || [ "$forge_ver" = "null" ]; then
@@ -131,7 +170,7 @@ case "$TYPE" in
       exit 1
     fi
     curl -sL -o forge-installer.jar "https://maven.minecraftforge.net/net/minecraftforge/forge/$forge_ver/forge-$forge_ver-installer.jar"
-    java -jar forge-installer.jar --installServer >> "$LOG" 2>&1
+    "$JAVA_CMD" -jar forge-installer.jar --installServer >> "$LOG" 2>&1
     rm -f forge-installer.jar 2>/dev/null || true
     JAR_NAME="run.sh"
     chmod +x "$JAR_NAME" 2>/dev/null || true
@@ -162,8 +201,15 @@ case "$TYPE" in
     # Use find instead of glob ls — more reliable across environments
     INSTALLER=$(find "$SERVER" -maxdepth 1 \( -name "forge-*-installer.jar" -o -name "neoforge-*-installer.jar" \) 2>/dev/null | head -1)
     if [ -n "$INSTALLER" ]; then
+      # Extract MC version from installer name (e.g. forge-1.20.1-47.4.2-installer.jar → 1.20.1)
+      CF_MC_VER=$(basename "$INSTALLER" | grep -oP '(?:forge|neoforge)-\K\d+\.\d+(?:\.\d+)?')
+      if [ -n "$CF_MC_VER" ]; then
+        JAVA_MC_VER="$CF_MC_VER"
+        JAVA_CMD=$(require_java "$(mc_java_ver "$CF_MC_VER")")
+        log "Detected MC $CF_MC_VER → using Java $(mc_java_ver "$CF_MC_VER") ($JAVA_CMD)"
+      fi
       log "Running Forge/NeoForge installer: $(basename "$INSTALLER")"
-      (cd "$SERVER" && java -jar "$(basename "$INSTALLER")" --installServer >> "$LOG" 2>&1)
+      (cd "$SERVER" && "$JAVA_CMD" -jar "$(basename "$INSTALLER")" --installServer >> "$LOG" 2>&1)
       INSTALLER_EXIT=$?
       [ $INSTALLER_EXIT -ne 0 ] && log "WARNING: Installer exited with code $INSTALLER_EXIT — continuing"
       rm -f "$INSTALLER"
@@ -184,7 +230,7 @@ case "$TYPE" in
       UNIX_ARGS=$(find "$SERVER/libraries" -name "unix_args.txt" 2>/dev/null | head -1)
       if [ -n "$UNIX_ARGS" ]; then
         log "Generating run.sh from unix_args.txt"
-        printf '#!/usr/bin/env bash\njava @user_jvm_args.txt @"%s" "$@"\n' "$UNIX_ARGS" > "$SERVER/run.sh"
+        printf '#!/usr/bin/env bash\n"%s" @user_jvm_args.txt @"%s" "$@"\n' "$JAVA_CMD" "$UNIX_ARGS" > "$SERVER/run.sh"
         chmod +x "$SERVER/run.sh"
         JAR_NAME="run.sh"
       fi
@@ -210,6 +256,18 @@ case "$TYPE" in
     ;;
 esac
 
+# ── Resolve correct Java for vanilla/paper/fabric (forge/curseforge set it earlier) ──
+if [ -n "$JAVA_MC_VER" ] && [ "$JAVA_CMD" = "java" ]; then
+  JAVA_NEED=$(mc_java_ver "$JAVA_MC_VER")
+  JAVA_CMD=$(require_java "$JAVA_NEED")
+  [ "$JAVA_CMD" != "java" ] && log "Using Java $JAVA_NEED for MC $JAVA_MC_VER"
+fi
+# Export JAVA_HOME so run.sh scripts (Forge/NeoForge) pick up the right Java
+if [ "$JAVA_CMD" != "java" ]; then
+  export JAVA_HOME
+  JAVA_HOME="$(dirname "$(dirname "$JAVA_CMD")")"
+fi
+
 # ── Accept EULA ─────────────────────────────────────────────────────────────
 # curseforge case writes eula.txt early (before start script detection); skip for others
 if [ "$TYPE" != "curseforge" ]; then
@@ -226,7 +284,7 @@ fi
 if [ "$JAR_NAME" = "run.sh" ]; then
   CMD="bash $JAR_NAME >> $LOG 2>&1"
 else
-  CMD="java $JVM -jar $JAR_NAME nogui >> $LOG 2>&1"
+  CMD="\"$JAVA_CMD\" $JVM -jar $JAR_NAME nogui >> $LOG 2>&1"
 fi
 
 tmux new-session -d -s mc "$CMD" || { err "Failed to create tmux session"; exit 1; }
