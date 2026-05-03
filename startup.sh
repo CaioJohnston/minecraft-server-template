@@ -354,23 +354,36 @@ fi
 
 if [ -f "$BORE_BIN" ]; then
   BORE_LOG="$SCRIPT_DIR/.bore.log"
-  "$BORE_BIN" local 25565 --to bore.pub > "$BORE_LOG" 2>&1 &
-  log "TCP tunnel started (bore.pub) — waiting for port assignment..."
 
-  # Background: wait for bore to connect, then write IP to file
+  # Watchdog: starts bore, detects IP, restarts if it dies
   (
-    for i in $(seq 1 20); do
-      sleep 1
-      ADDR=$(grep -oP 'bore\.pub:\d+' "$BORE_LOG" 2>/dev/null | head -1)
-      if [ -n "$ADDR" ]; then
-        echo "$ADDR" > "$SERVER_IP_FILE"
-        echo "[$(date '+%H:%M:%S')] [MINEHOST] Server IP: $ADDR — players can connect!" >> "$LOG"
-        break
+    while true; do
+      rm -f "$SERVER_IP_FILE"
+      > "$BORE_LOG"
+      "$BORE_BIN" local 25565 --to bore.pub > "$BORE_LOG" 2>&1 &
+      BORE_PID=$!
+
+      # Wait for bore to report its assigned port (up to 20s)
+      for i in $(seq 1 20); do
+        sleep 1
+        ADDR=$(grep -oP 'bore\.pub:\d+' "$BORE_LOG" 2>/dev/null | head -1)
+        if [ -n "$ADDR" ]; then
+          echo "$ADDR" > "$SERVER_IP_FILE"
+          echo "[$(date '+%H:%M:%S')] [MINEHOST] Server IP: $ADDR — players can connect!" >> "$LOG"
+          break
+        fi
+      done
+
+      if [ ! -f "$SERVER_IP_FILE" ]; then
+        echo "[$(date '+%H:%M:%S')] [MINEHOST] WARN: bore did not connect in 20s — retrying..." >> "$LOG"
       fi
+
+      # Wait for bore process to exit
+      wait $BORE_PID 2>/dev/null
+      rm -f "$SERVER_IP_FILE"
+      echo "[$(date '+%H:%M:%S')] [MINEHOST] bore tunnel dropped — reconnecting in 5s..." >> "$LOG"
+      sleep 5
     done
-    if [ ! -f "$SERVER_IP_FILE" ]; then
-      echo "[$(date '+%H:%M:%S')] [MINEHOST] WARN: bore did not connect in 20s — no public IP" >> "$LOG"
-    fi
   ) &
 else
   log "bore not available — no TCP tunnel (players cannot connect externally)"

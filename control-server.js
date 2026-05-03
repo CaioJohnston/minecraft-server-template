@@ -43,6 +43,13 @@ function getLastLines(n = 200) {
   return lines.slice(-n);
 }
 
+function getLastLinesWithTotal(n = 500) {
+  if (!fs.existsSync(LOG_FILE)) return { lines: [], total: 0 };
+  const content = fs.readFileSync(LOG_FILE, "utf8");
+  const all = content.split("\n").filter((l) => l.length > 0);
+  return { lines: all.slice(-n), total: all.length };
+}
+
 function getConfig() {
   if (!fs.existsSync(CONFIG_FILE)) return null;
   try {
@@ -56,9 +63,19 @@ function setConfig(obj) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(obj, null, 2));
 }
 
+function isBoreAlive() {
+  try {
+    execSync("pgrep -x bore", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function getServerIP() {
   try {
     if (!fs.existsSync(SERVER_IP_FILE)) return null;
+    if (!isBoreAlive()) return null;
     const ip = fs.readFileSync(SERVER_IP_FILE, "utf8").trim();
     return ip || null;
   } catch {
@@ -328,11 +345,11 @@ function gistRequest(method, body, cb) {
 
 function pushGistState() {
   if (!GIST_ID || !MINEHOST_TOKEN) return;
-  const log = getLastLines(500);
+  const { lines: log, total: cursor } = getLastLinesWithTotal(500);
   const newState = {
     running: getServerRunning(),
     log,
-    cursor: log.length,
+    cursor,
     pending_cmd: null,
     updated: Date.now(),
     server_ip: getServerIP(),
