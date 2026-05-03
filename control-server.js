@@ -12,6 +12,7 @@ const SCRIPT_DIR = path.dirname(path.resolve(__filename));
 const SERVER_DIR = process.env.SERVER_DIR || path.join(SCRIPT_DIR, "server");
 const LOG_FILE = path.join(SERVER_DIR, "server.log");
 const CONFIG_FILE = path.join(SERVER_DIR, "minehost.json");
+const SERVER_IP_FILE = path.join(SCRIPT_DIR, ".server_ip");
 
 // ── Utility functions ───────────────────────────────────────────────────────
 
@@ -53,6 +54,33 @@ function getConfig() {
 
 function setConfig(obj) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(obj, null, 2));
+}
+
+function getServerIP() {
+  try {
+    if (!fs.existsSync(SERVER_IP_FILE)) return null;
+    const ip = fs.readFileSync(SERVER_IP_FILE, "utf8").trim();
+    return ip || null;
+  } catch {
+    return null;
+  }
+}
+
+function getRam() {
+  try {
+    const content = fs.readFileSync("/proc/meminfo", "utf8");
+    const total = parseInt(content.match(/MemTotal:\s+(\d+)/)?.[1] ?? "0");
+    const avail = parseInt(content.match(/MemAvailable:\s+(\d+)/)?.[1] ?? "0");
+    if (!total) return null;
+    const used = total - avail;
+    return {
+      usedMB: Math.round(used / 1024),
+      totalMB: Math.round(total / 1024),
+      percent: Math.round((used / total) * 100),
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ── WebSocket ───────────────────────────────────────────────────────────────
@@ -301,22 +329,25 @@ function gistRequest(method, body, cb) {
 function pushGistState() {
   if (!GIST_ID || !MINEHOST_TOKEN) return;
   const log = getLastLines(500);
-  const state = {
+  const newState = {
     running: getServerRunning(),
     log,
     cursor: log.length,
     pending_cmd: null,
     updated: Date.now(),
+    server_ip: getServerIP(),
+    config: getConfig(),
+    ram: getRam(),
   };
   // Read current pending_cmd before overwriting, so we don't clear it accidentally
   gistRequest("GET", null, (current) => {
     if (current?.files?.["state.json"]?.content) {
       try {
         const cur = JSON.parse(current.files["state.json"].content);
-        state.pending_cmd = cur.pending_cmd ?? null;
+        newState.pending_cmd = cur.pending_cmd ?? null;
       } catch {}
     }
-    gistRequest("PATCH", { files: { "state.json": { content: JSON.stringify(state) } } }, null);
+    gistRequest("PATCH", { files: { "state.json": { content: JSON.stringify(newState) } } }, null);
   });
 }
 

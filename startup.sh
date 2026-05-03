@@ -192,6 +192,44 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
+# ── TCP tunnel via bore (exposes port 25565 publicly for Minecraft clients) ──
+BORE_BIN="$SCRIPT_DIR/bore"
+SERVER_IP_FILE="$SCRIPT_DIR/.server_ip"
+rm -f "$SERVER_IP_FILE"
+
+if [ ! -f "$BORE_BIN" ]; then
+  log "Downloading bore TCP tunnel..."
+  BORE_VER=$(curl -sL --connect-timeout 5 "https://api.github.com/repos/ekzhang/bore/releases/latest" \
+    | grep '"tag_name"' | grep -oP 'v\K[0-9.]+' | head -1)
+  BORE_VER="${BORE_VER:-0.5.0}"
+  curl -sL "https://github.com/ekzhang/bore/releases/download/v${BORE_VER}/bore-v${BORE_VER}-x86_64-unknown-linux-musl.tar.gz" \
+    | tar -xz -C "$SCRIPT_DIR" 2>/dev/null
+  [ -f "$BORE_BIN" ] && chmod +x "$BORE_BIN" && log "bore $BORE_VER downloaded"
+fi
+
+if [ -f "$BORE_BIN" ]; then
+  BORE_LOG="$SCRIPT_DIR/.bore.log"
+  "$BORE_BIN" local 25565 --to bore.pub > "$BORE_LOG" 2>&1 &
+  log "TCP tunnel started (bore.pub) — waiting for port assignment..."
+
+  # Background: wait for bore to connect, then write IP to file
+  (
+    for i in $(seq 1 20); do
+      sleep 1
+      ADDR=$(grep -oP 'bore\.pub:\d+' "$BORE_LOG" 2>/dev/null | head -1)
+      if [ -n "$ADDR" ]; then
+        echo "$ADDR" > "$SERVER_IP_FILE"
+        echo "[$(date '+%H:%M:%S')] [MINEHOST] Server IP: $ADDR — players can connect!" >> "$LOG"
+        break
+      fi
+    done
+    if [ ! -f "$SERVER_IP_FILE" ]; then
+      echo "[$(date '+%H:%M:%S')] [MINEHOST] WARN: bore did not connect in 20s — no public IP" >> "$LOG"
+    fi
+  ) &
+else
+  log "bore not available — no TCP tunnel (players cannot connect externally)"
+fi
 
 # Keep script alive
 tail -f "$LOG"
