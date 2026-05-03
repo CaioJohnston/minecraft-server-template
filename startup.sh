@@ -100,6 +100,21 @@ tmux kill-session -t mc 2>/dev/null || true
 JAVA_CMD="java"
 JAVA_MC_VER=""
 
+# For non-CurseForge types with a pinned version, resolve and install Java now
+# CurseForge: MC version only known after extracting the pack — handled inside the case block
+if [ "$TYPE" != "curseforge" ] && [ "$VER" != "latest" ]; then
+  JAVA_NEED=$(mc_java_ver "$VER")
+  RESOLVED=$(require_java "$JAVA_NEED")
+  if [ "$RESOLVED" != "java" ]; then
+    JAVA_CMD="$RESOLVED"
+    JAVA_MC_VER="$VER"
+    JAVA_HOME="$(dirname "$(dirname "$JAVA_CMD")")"
+    export JAVA_HOME
+    export PATH="$(dirname "$JAVA_CMD"):$PATH"
+    log "Pre-installed Java $JAVA_NEED for MC $VER"
+  fi
+fi
+
 # ────────────────────────────────────────
 # Download server JAR
 # ────────────────────────────────────────
@@ -263,10 +278,12 @@ if [ -n "$JAVA_MC_VER" ] && [ "$JAVA_CMD" = "java" ]; then
   JAVA_CMD=$(require_java "$JAVA_NEED")
   [ "$JAVA_CMD" != "java" ] && log "Using Java $JAVA_NEED for MC $JAVA_MC_VER"
 fi
-# Export JAVA_HOME so run.sh scripts (Forge/NeoForge) pick up the right Java
+# Export JAVA_HOME and prepend to PATH so run.sh scripts (Forge/NeoForge) pick up the right Java
 if [ "$JAVA_CMD" != "java" ]; then
-  export JAVA_HOME
   JAVA_HOME="$(dirname "$(dirname "$JAVA_CMD")")"
+  export JAVA_HOME
+  export PATH="$(dirname "$JAVA_CMD"):$PATH"
+  log "Java path: $JAVA_CMD | JAVA_HOME: $JAVA_HOME"
 fi
 
 # ── Accept EULA ─────────────────────────────────────────────────────────────
