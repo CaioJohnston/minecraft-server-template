@@ -121,149 +121,186 @@ fi
 
 case "$TYPE" in
   vanilla)
-    MANIFEST=$(curl -sL "https://launchermeta.mojang.com/mc/game/version_manifest.json")
-    if [ "$VER" = "latest" ]; then
-      VER_ID=$(echo "$MANIFEST" | jq -r '.latest.release')
+    if [ -f "$SERVER/server.jar" ]; then
+      JAR_NAME="server.jar"
+      JAVA_MC_VER=$(cat "$SCRIPT_DIR/.mc_java_ver" 2>/dev/null || echo "$VER")
+      log "Vanilla already installed — skipping download"
     else
-      VER_ID="$VER"
+      MANIFEST=$(curl -sL "https://launchermeta.mojang.com/mc/game/version_manifest.json")
+      if [ "$VER" = "latest" ]; then
+        VER_ID=$(echo "$MANIFEST" | jq -r '.latest.release')
+      else
+        VER_ID="$VER"
+      fi
+      VER_URL=$(echo "$MANIFEST" | jq -r --arg v "$VER_ID" '.versions[] | select(.id == $v) | .url' | head -1)
+      if [ -z "$VER_URL" ] || [ "$VER_URL" = "null" ]; then
+        err "Could not find Vanilla $VER_ID in manifest"
+        exit 1
+      fi
+      JAR=$(curl -sL "$VER_URL" | jq -r '.downloads.server.url')
+      curl -sL -o server.jar "$JAR"
+      JAR_NAME="server.jar"
+      JAVA_MC_VER="$VER_ID"
+      echo "$JAVA_MC_VER" > "$SCRIPT_DIR/.mc_java_ver"
+      log "Downloaded Vanilla $VER_ID"
     fi
-    VER_URL=$(echo "$MANIFEST" | jq -r --arg v "$VER_ID" '.versions[] | select(.id == $v) | .url' | head -1)
-    if [ -z "$VER_URL" ] || [ "$VER_URL" = "null" ]; then
-      err "Could not find Vanilla $VER_ID in manifest"
-      exit 1
-    fi
-    JAR=$(curl -sL "$VER_URL" | jq -r '.downloads.server.url')
-    curl -sL -o server.jar "$JAR"
-    JAR_NAME="server.jar"
-    JAVA_MC_VER="$VER_ID"
-    log "Downloaded Vanilla $VER_ID"
     ;;
 
   paper)
-    API="https://api.papermc.io/v2/projects/paper"
-    if [ "$VER" = "latest" ]; then
-      LVER=$(curl -sL "$API/versions" | jq -r '.versions[-1]')
+    if [ -f "$SERVER/paper.jar" ]; then
+      JAR_NAME="paper.jar"
+      JAVA_MC_VER=$(cat "$SCRIPT_DIR/.mc_java_ver" 2>/dev/null || echo "$VER")
+      log "Paper already installed — skipping download"
     else
-      LVER="$VER"
+      API="https://api.papermc.io/v2/projects/paper"
+      if [ "$VER" = "latest" ]; then
+        LVER=$(curl -sL "$API/versions" | jq -r '.versions[-1]')
+      else
+        LVER="$VER"
+      fi
+      BNUM=$(curl -sL "$API/versions/$LVER/builds" | jq -r '.builds[-1].build')
+      JNAME=$(curl -sL "$API/versions/$LVER/builds/$BNUM" | jq -r '.downloads.application.name')
+      curl -sL -o paper.jar "$API/versions/$LVER/builds/$BNUM/downloads/$JNAME"
+      JAR_NAME="paper.jar"
+      JAVA_MC_VER="$LVER"
+      echo "$JAVA_MC_VER" > "$SCRIPT_DIR/.mc_java_ver"
+      log "Downloaded Paper $LVER build #$BNUM"
     fi
-    BNUM=$(curl -sL "$API/versions/$LVER/builds" | jq -r '.builds[-1].build')
-    JNAME=$(curl -sL "$API/versions/$LVER/builds/$BNUM" | jq -r '.downloads.application.name')
-    curl -sL -o paper.jar "$API/versions/$LVER/builds/$BNUM/downloads/$JNAME"
-    JAR_NAME="paper.jar"
-    JAVA_MC_VER="$LVER"
-    log "Downloaded Paper $LVER build #$BNUM"
     ;;
 
   fabric)
-    FAPI="https://meta.fabricmc.net/v2"
-    if [ "$VER" = "latest" ]; then
-      VER=$(curl -sL "$FAPI/versions/game?limit=1" | jq -r '.[0].version')
+    if [ -f "$SERVER/fabric-server-launch.jar" ]; then
+      JAR_NAME="fabric-server-launch.jar"
+      JAVA_MC_VER=$(cat "$SCRIPT_DIR/.mc_java_ver" 2>/dev/null || echo "$VER")
+      log "Fabric already installed — skipping install"
+    else
+      FAPI="https://meta.fabricmc.net/v2"
+      if [ "$VER" = "latest" ]; then
+        VER=$(curl -sL "$FAPI/versions/game?limit=1" | jq -r '.[0].version')
+      fi
+      LOADER=$(curl -sL "$FAPI/versions/$VER" | jq -r '.[0].loader.version')
+      log "Installing Fabric $VER with loader $LOADER"
+      curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
+      java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction >> "$LOG" 2>&1
+      JAR_NAME="fabric-server-launch.jar"
+      JAVA_MC_VER="$VER"
+      rm -f fabric-installer.jar 2>/dev/null || true
+      echo "$JAVA_MC_VER" > "$SCRIPT_DIR/.mc_java_ver"
+      log "Fabric $VER installed"
     fi
-    LOADER=$(curl -sL "$FAPI/versions/$VER" | jq -r '.[0].loader.version')
-    log "Installing Fabric $VER with loader $LOADER"
-    curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
-    java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction >> "$LOG" 2>&1
-    JAR_NAME="fabric-server-launch.jar"
-    JAVA_MC_VER="$VER"
-    rm -f fabric-installer.jar 2>/dev/null || true
-    log "Fabric $VER installed"
     ;;
 
   forge)
-    if [ "$VER" = "latest" ]; then
-      MC_VER=$(curl -sL "https://launchermeta.mojang.com/mc/game/version_manifest.json" | jq -r '.latest.release')
+    if [ -f "$SERVER/run.sh" ]; then
+      JAR_NAME="run.sh"
+      JAVA_MC_VER=$(cat "$SCRIPT_DIR/.mc_java_ver" 2>/dev/null || echo "$VER")
+      log "Forge already installed — skipping install"
     else
-      MC_VER="$VER"
+      if [ "$VER" = "latest" ]; then
+        MC_VER=$(curl -sL "https://launchermeta.mojang.com/mc/game/version_manifest.json" | jq -r '.latest.release')
+      else
+        MC_VER="$VER"
+      fi
+      log "Installing Forge for Minecraft $MC_VER"
+      JAVA_CMD=$(require_java "$(mc_java_ver "$MC_VER")")
+      JAVA_MC_VER="$MC_VER"
+      log "Using Java $(mc_java_ver "$MC_VER") for Forge ($JAVA_CMD)"
+      MCDATA=$(curl -sL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
+      forge_ver=$(echo "$MCDATA" | grep "<latest>" | head -1 | sed 's/.*<latest>\(.*\)<\/latest>.*/\1/')
+      if [ -z "$forge_ver" ] || [ "$forge_ver" = "null" ]; then
+        err "Could not find Forge installer"
+        exit 1
+      fi
+      curl -sL -o forge-installer.jar "https://maven.minecraftforge.net/net/minecraftforge/forge/$forge_ver/forge-$forge_ver-installer.jar"
+      "$JAVA_CMD" -jar forge-installer.jar --installServer >> "$LOG" 2>&1
+      rm -f forge-installer.jar 2>/dev/null || true
+      JAR_NAME="run.sh"
+      chmod +x "$JAR_NAME" 2>/dev/null || true
+      echo "$JAVA_MC_VER" > "$SCRIPT_DIR/.mc_java_ver"
+      log "Forge $forge_ver installed"
     fi
-    log "Installing Forge for Minecraft $MC_VER"
-    JAVA_CMD=$(require_java "$(mc_java_ver "$MC_VER")")
-    JAVA_MC_VER="$MC_VER"
-    log "Using Java $(mc_java_ver "$MC_VER") for Forge ($JAVA_CMD)"
-    MCDATA=$(curl -sL "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
-    forge_ver=$(echo "$MCDATA" | grep "<latest>" | head -1 | sed 's/.*<latest>\(.*\)<\/latest>.*/\1/')
-    if [ -z "$forge_ver" ] || [ "$forge_ver" = "null" ]; then
-      err "Could not find Forge installer"
-      exit 1
-    fi
-    curl -sL -o forge-installer.jar "https://maven.minecraftforge.net/net/minecraftforge/forge/$forge_ver/forge-$forge_ver-installer.jar"
-    "$JAVA_CMD" -jar forge-installer.jar --installServer >> "$LOG" 2>&1
-    rm -f forge-installer.jar 2>/dev/null || true
-    JAR_NAME="run.sh"
-    chmod +x "$JAR_NAME" 2>/dev/null || true
-    log "Forge $forge_ver installed"
     ;;
 
   curseforge)
-    if [ -z "$MINEHOST_CF_URL" ]; then
-      err "MINEHOST_CF_URL not set — provide the server pack URL during setup"
-      exit 1
-    fi
-    log "Downloading CurseForge server pack..."
-    if ! curl -sL -L --connect-timeout 30 --max-time 600 -o /tmp/cfpack.zip "$MINEHOST_CF_URL"; then
-      err "Download failed: $MINEHOST_CF_URL"
-      exit 1
-    fi
-    log "Extracting server pack..."
-    unzip -q /tmp/cfpack.zip -d "$SERVER" 2>/dev/null || { err "Failed to extract zip"; exit 1; }
-    rm -f /tmp/cfpack.zip
-
-    # Write JVM args for modern Forge/NeoForge run.sh (uses user_jvm_args.txt)
-    echo "$JVM" > "$SERVER/user_jvm_args.txt"
-
-    # Accept EULA now (before looking for start scripts)
-    echo "eula=true" > "$SERVER/eula.txt"
-
-    # Run installer if pack ships forge/neoforge installer instead of server
-    # Use find instead of glob ls — more reliable across environments
-    INSTALLER=$(find "$SERVER" -maxdepth 1 \( -name "forge-*-installer.jar" -o -name "neoforge-*-installer.jar" \) 2>/dev/null | head -1)
-    if [ -n "$INSTALLER" ]; then
-      # Extract MC version from installer name (e.g. forge-1.20.1-47.4.2-installer.jar → 1.20.1)
-      CF_MC_VER=$(basename "$INSTALLER" | grep -oP '(?:forge|neoforge)-\K\d+\.\d+(?:\.\d+)?')
-      if [ -n "$CF_MC_VER" ]; then
-        JAVA_MC_VER="$CF_MC_VER"
-        JAVA_CMD=$(require_java "$(mc_java_ver "$CF_MC_VER")")
-        log "Detected MC $CF_MC_VER → using Java $(mc_java_ver "$CF_MC_VER") ($JAVA_CMD)"
-      fi
-      log "Running Forge/NeoForge installer: $(basename "$INSTALLER")"
-      (cd "$SERVER" && "$JAVA_CMD" -jar "$(basename "$INSTALLER")" --installServer >> "$LOG" 2>&1)
-      INSTALLER_EXIT=$?
-      [ $INSTALLER_EXIT -ne 0 ] && log "WARNING: Installer exited with code $INSTALLER_EXIT — continuing"
-      rm -f "$INSTALLER"
-    fi
-
-    # Find start mechanism — ordered by preference
-    CMD=""
+    # Check if already installed — look for known start scripts or libraries dir
+    CF_JAR_NAME=""
     for script in run.sh start.sh startserver.sh ServerStart.sh; do
       if [ -f "$SERVER/$script" ]; then
-        chmod +x "$SERVER/$script"
-        JAR_NAME="$script"
+        CF_JAR_NAME="$script"
         break
       fi
     done
+    [ -z "$CF_JAR_NAME" ] && [ -d "$SERVER/libraries" ] && \
+      CF_JAR_NAME=$(find "$SERVER" -maxdepth 1 \( -name "server.jar" -o -name "minecraft_server*.jar" -o -name "forge-*-server.jar" -o -name "neoforge-*-server.jar" \) 2>/dev/null | head -1 | xargs -r basename)
 
-    # Fallback: run.bat present — generate run.sh from libraries/unix_args.txt
-    if [ -z "$JAR_NAME" ] && [ -f "$SERVER/run.bat" ]; then
-      UNIX_ARGS=$(find "$SERVER/libraries" -name "unix_args.txt" 2>/dev/null | head -1)
-      if [ -n "$UNIX_ARGS" ]; then
-        log "Generating run.sh from unix_args.txt"
-        printf '#!/usr/bin/env bash\n"%s" @user_jvm_args.txt @"%s" "$@"\n' "$JAVA_CMD" "$UNIX_ARGS" > "$SERVER/run.sh"
-        chmod +x "$SERVER/run.sh"
-        JAR_NAME="run.sh"
-      fi
-    fi
-
-    # Fallback: find server jar directly
-    if [ -z "$JAR_NAME" ]; then
-      FOUND_JAR=$(find "$SERVER" -maxdepth 1 \( -name "server.jar" -o -name "minecraft_server*.jar" -o -name "forge-*-server.jar" -o -name "neoforge-*-server.jar" \) 2>/dev/null | head -1)
-      if [ -n "$FOUND_JAR" ]; then
-        JAR_NAME=$(basename "$FOUND_JAR")
-      else
-        err "No server start method found. Contents: $(ls "$SERVER" | head -20 | tr '\n' ' ')"
+    if [ -n "$CF_JAR_NAME" ]; then
+      JAR_NAME="$CF_JAR_NAME"
+      JAVA_MC_VER=$(cat "$SCRIPT_DIR/.mc_java_ver" 2>/dev/null || echo "")
+      echo "$JVM" > "$SERVER/user_jvm_args.txt"
+      log "CurseForge already installed ($JAR_NAME) — skipping download"
+    else
+      if [ -z "$MINEHOST_CF_URL" ]; then
+        err "MINEHOST_CF_URL not set — provide the server pack URL during setup"
         exit 1
       fi
-    fi
+      log "Downloading CurseForge server pack..."
+      if ! curl -sL -L --connect-timeout 30 --max-time 600 -o /tmp/cfpack.zip "$MINEHOST_CF_URL"; then
+        err "Download failed: $MINEHOST_CF_URL"
+        exit 1
+      fi
+      log "Extracting server pack..."
+      unzip -q /tmp/cfpack.zip -d "$SERVER" 2>/dev/null || { err "Failed to extract zip"; exit 1; }
+      rm -f /tmp/cfpack.zip
 
-    log "CurseForge server pack ready: $JAR_NAME"
+      echo "$JVM" > "$SERVER/user_jvm_args.txt"
+      echo "eula=true" > "$SERVER/eula.txt"
+
+      INSTALLER=$(find "$SERVER" -maxdepth 1 \( -name "forge-*-installer.jar" -o -name "neoforge-*-installer.jar" \) 2>/dev/null | head -1)
+      if [ -n "$INSTALLER" ]; then
+        CF_MC_VER=$(basename "$INSTALLER" | grep -oP '(?:forge|neoforge)-\K\d+\.\d+(?:\.\d+)?')
+        if [ -n "$CF_MC_VER" ]; then
+          JAVA_MC_VER="$CF_MC_VER"
+          JAVA_CMD=$(require_java "$(mc_java_ver "$CF_MC_VER")")
+          log "Detected MC $CF_MC_VER → using Java $(mc_java_ver "$CF_MC_VER") ($JAVA_CMD)"
+        fi
+        log "Running Forge/NeoForge installer: $(basename "$INSTALLER")"
+        (cd "$SERVER" && "$JAVA_CMD" -jar "$(basename "$INSTALLER")" --installServer >> "$LOG" 2>&1)
+        INSTALLER_EXIT=$?
+        [ $INSTALLER_EXIT -ne 0 ] && log "WARNING: Installer exited with code $INSTALLER_EXIT — continuing"
+        rm -f "$INSTALLER"
+      fi
+
+      for script in run.sh start.sh startserver.sh ServerStart.sh; do
+        if [ -f "$SERVER/$script" ]; then
+          chmod +x "$SERVER/$script"
+          JAR_NAME="$script"
+          break
+        fi
+      done
+
+      if [ -z "$JAR_NAME" ] && [ -f "$SERVER/run.bat" ]; then
+        UNIX_ARGS=$(find "$SERVER/libraries" -name "unix_args.txt" 2>/dev/null | head -1)
+        if [ -n "$UNIX_ARGS" ]; then
+          log "Generating run.sh from unix_args.txt"
+          printf '#!/usr/bin/env bash\n"%s" @user_jvm_args.txt @"%s" "$@"\n' "$JAVA_CMD" "$UNIX_ARGS" > "$SERVER/run.sh"
+          chmod +x "$SERVER/run.sh"
+          JAR_NAME="run.sh"
+        fi
+      fi
+
+      if [ -z "$JAR_NAME" ]; then
+        FOUND_JAR=$(find "$SERVER" -maxdepth 1 \( -name "server.jar" -o -name "minecraft_server*.jar" -o -name "forge-*-server.jar" -o -name "neoforge-*-server.jar" \) 2>/dev/null | head -1)
+        if [ -n "$FOUND_JAR" ]; then
+          JAR_NAME=$(basename "$FOUND_JAR")
+        else
+          err "No server start method found. Contents: $(ls "$SERVER" | head -20 | tr '\n' ' ')"
+          exit 1
+        fi
+      fi
+
+      echo "$JAVA_MC_VER" > "$SCRIPT_DIR/.mc_java_ver"
+      log "CurseForge server pack ready: $JAR_NAME"
+    fi
     ;;
 
   *)
@@ -305,6 +342,7 @@ else
   CMD="\"$JAVA_CMD\" $JVM -jar $JAR_NAME nogui >> $LOG 2>&1"
 fi
 
+echo "$CMD" > "$SCRIPT_DIR/.mc_cmd"
 tmux new-session -d -s mc "$CMD" || { err "Failed to create tmux session"; exit 1; }
 
 if [ "$FIRST_RUN" = true ]; then

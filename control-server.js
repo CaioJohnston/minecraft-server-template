@@ -315,6 +315,36 @@ const GIST_ID = process.env.MINEHOST_GIST_ID;
 const MINEHOST_TOKEN = process.env.MINEHOST_TOKEN;
 let lastHandledCmd = null;
 
+function restartMCServer() {
+  const cmdFile = path.join(SCRIPT_DIR, ".mc_cmd");
+  if (!fs.existsSync(cmdFile)) {
+    console.error("[control] .mc_cmd not found — cannot restart");
+    return;
+  }
+  const cmd = fs.readFileSync(cmdFile, "utf8").trim();
+  sendToConsole("stop");
+
+  let waited = 0;
+  const check = setInterval(() => {
+    waited += 2;
+    if (!getServerRunning() || waited >= 30) {
+      clearInterval(check);
+      try { execSync("tmux kill-session -t mc 2>/dev/null || true", { stdio: "ignore" }); } catch {}
+      setTimeout(() => {
+        try {
+          execSync(`cd ${JSON.stringify(SERVER_DIR)} && tmux new-session -d -s mc ${JSON.stringify(cmd)}`, {
+            stdio: "ignore",
+            shell: "/bin/bash",
+          });
+          console.log("[control] MC server restarted");
+        } catch (e) {
+          console.error("[control] Restart failed:", e.message);
+        }
+      }, 2000);
+    }
+  }, 2000);
+}
+
 function gistRequest(method, body, cb) {
   const https = require("https");
   const payload = body ? JSON.stringify(body) : null;
@@ -377,10 +407,13 @@ function pollPendingCmd() {
       const cmd = state.pending_cmd;
       if (cmd && cmd !== lastHandledCmd) {
         lastHandledCmd = cmd;
-        sendToConsole(cmd);
-        // Clear pending_cmd
         state.pending_cmd = null;
         gistRequest("PATCH", { files: { "state.json": { content: JSON.stringify(state) } } }, null);
+        if (cmd === "__minehost_restart__") {
+          restartMCServer();
+        } else {
+          sendToConsole(cmd);
+        }
       }
     } catch {}
   });
