@@ -138,6 +138,56 @@ case "$TYPE" in
     log "Forge $forge_ver installed"
     ;;
 
+  curseforge)
+    if [ -z "$MINEHOST_CF_URL" ]; then
+      err "MINEHOST_CF_URL not set — provide the server pack URL during setup"
+      exit 1
+    fi
+    log "Downloading CurseForge server pack..."
+    if ! curl -sL -L --connect-timeout 30 --max-time 600 -o /tmp/cfpack.zip "$MINEHOST_CF_URL"; then
+      err "Download failed: $MINEHOST_CF_URL"
+      exit 1
+    fi
+    log "Extracting server pack..."
+    unzip -q /tmp/cfpack.zip -d "$SERVER" 2>/dev/null || { err "Failed to extract zip"; exit 1; }
+    rm -f /tmp/cfpack.zip
+
+    # Write JVM args for modern Forge/NeoForge run.sh (uses user_jvm_args.txt)
+    echo "$JVM" > "$SERVER/user_jvm_args.txt"
+
+    # Accept EULA now (before looking for start scripts)
+    echo "eula=true" > "$SERVER/eula.txt"
+
+    # Find start mechanism — ordered by preference
+    CMD=""
+    for script in run.sh start.sh startserver.sh ServerStart.sh; do
+      if [ -f "$SERVER/$script" ]; then
+        chmod +x "$SERVER/$script"
+        CMD="cd '$SERVER' && bash '$script' >> $LOG 2>&1"
+        JAR_NAME="$script"
+        break
+      fi
+    done
+
+    # Fallback: find server jar
+    if [ -z "$CMD" ]; then
+      FOUND_JAR=""
+      for pattern in "server.jar" "minecraft_server*.jar" "forge-*-server.jar" "neoforge-*-server.jar"; do
+        MATCH=$(ls $SERVER/$pattern 2>/dev/null | head -1)
+        if [ -n "$MATCH" ]; then FOUND_JAR="$MATCH"; break; fi
+      done
+      if [ -n "$FOUND_JAR" ]; then
+        JAR_NAME=$(basename "$FOUND_JAR")
+        CMD="java $JVM -jar '$FOUND_JAR' nogui >> $LOG 2>&1"
+      else
+        err "No server start method found. Contents: $(ls $SERVER | head -20 | tr '\n' ' ')"
+        exit 1
+      fi
+    fi
+
+    log "CurseForge server pack ready: $JAR_NAME"
+    ;;
+
   *)
     err "Unknown server type: $TYPE"
     exit 1
@@ -145,7 +195,10 @@ case "$TYPE" in
 esac
 
 # ── Accept EULA ─────────────────────────────────────────────────────────────
-echo "eula=true" > eula.txt
+# curseforge case writes eula.txt early (before start script detection); skip for others
+if [ "$TYPE" != "curseforge" ]; then
+  echo "eula=true" > eula.txt
+fi
 
 # ── Start server in tmux session ─────────────────────────────────────────────
 FIRST_RUN=false
