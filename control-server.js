@@ -76,11 +76,25 @@ function setConfig(obj) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(obj, null, 2));
 }
 
+// Cache last known IP across brief playit reconnects.
+// If .server_ip disappears (playit restarted) but no new claim URL exists, keep
+// serving the last address for up to 90 seconds so the UI doesn't blank out.
+let _cachedIp = null;
+let _cachedIpAt = 0;
+const SERVER_IP_CACHE_TTL = 90000;
+
 function getServerIP() {
   try {
-    if (!fs.existsSync(SERVER_IP_FILE)) return null;
-    const ip = fs.readFileSync(SERVER_IP_FILE, "utf8").trim();
-    return ip || null;
+    if (fs.existsSync(SERVER_IP_FILE)) {
+      const ip = fs.readFileSync(SERVER_IP_FILE, "utf8").trim();
+      if (ip) { _cachedIp = ip; _cachedIpAt = Date.now(); return ip; }
+    }
+    // New claim URL means old tunnel is gone — clear cache immediately
+    if (fs.existsSync(PLAYIT_CLAIM_FILE)) { _cachedIp = null; return null; }
+    // File gone but no claim yet (playit reconnecting) — serve cached value within TTL
+    if (_cachedIp && (Date.now() - _cachedIpAt) < SERVER_IP_CACHE_TTL) return _cachedIp;
+    _cachedIp = null;
+    return null;
   } catch {
     return null;
   }
