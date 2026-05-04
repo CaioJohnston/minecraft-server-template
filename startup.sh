@@ -209,8 +209,10 @@ fi
 
 log "Preparing $TYPE server (version: $VER)"
 
-# Kill leftover tmux sessions
+# Kill leftover tmux sessions and release any stale world lock
 tmux kill-session -t mc 2>/dev/null || true
+sleep 2
+find "$SERVER" -name "session.lock" -delete 2>/dev/null || true
 
 JAVA_CMD="java"
 JAVA_MC_VER=""
