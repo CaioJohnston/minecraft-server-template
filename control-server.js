@@ -54,8 +54,13 @@ function getLastLines(n = 200) {
 function getLastLinesWithTotal(n = 500) {
   if (!fs.existsSync(LOG_FILE)) return { lines: [], total: 0 };
   const content = fs.readFileSync(LOG_FILE, "utf8");
-  const all = content.split(/\r?\n|\r/).map(stripLine).filter((l) => l.length > 0);
-  return { lines: all.slice(-n), total: all.length };
+  const rawAll = content.split(/\r?\n|\r/);
+  // Count total non-empty raw lines without stripLine (fast for large modpack logs)
+  let total = 0;
+  for (const l of rawAll) if (l.trim()) total++;
+  // Apply stripLine only to the last n*2 raw lines (buffer for empties after strip)
+  const lines = rawAll.slice(-(n * 2)).map(stripLine).filter((l) => l.length > 0).slice(-n);
+  return { lines, total };
 }
 
 function getConfig() {
@@ -356,11 +361,13 @@ function restartMCServer() {
 function gistRequest(method, body, cb) {
   const https = require("https");
   const payload = body ? JSON.stringify(body) : null;
+  // 10s timeout prevents hanging requests from accumulating in the event loop
   const req = https.request(
     {
       hostname: "api.github.com",
       path: `/gists/${GIST_ID}`,
       method,
+      timeout: 10000,
       headers: {
         Authorization: `Bearer ${MINEHOST_TOKEN}`,
         Accept: "application/vnd.github+json",
@@ -377,11 +384,16 @@ function gistRequest(method, body, cb) {
     }
   );
   req.on("error", () => cb && cb(null));
+  req.on("timeout", () => { req.destroy(); cb && cb(null); });
   if (payload) req.write(payload);
   req.end();
 }
 
-function pushGistState() {
+// Single sync function: ONE GET + ONE PATCH per cycle.
+// Previously two separate functions (pushGistState + pollPendingCmd) each doing a GET,
+// totalling 3 API calls/3s = 60/min — too close to GitHub's 100/min secondary rate limit.
+// Now: 2 calls/5s = 24/min from this process + ~12/min from frontend = 36/min total.
+function syncGist() {
   if (!GIST_ID || !MINEHOST_TOKEN) return;
   const { lines: log, total: cursor } = getLastLinesWithTotal(500);
   const newState = {
@@ -396,43 +408,31 @@ function pushGistState() {
     config: getConfig(),
     ram: getRam(),
   };
-  // Read current pending_cmd before overwriting, so we don't clear it accidentally
+
   gistRequest("GET", null, (current) => {
     if (current?.files?.["state.json"]?.content) {
       try {
         const cur = JSON.parse(current.files["state.json"].content);
-        newState.pending_cmd = cur.pending_cmd ?? null;
+        // Handle pending command in the same cycle (no separate pollPendingCmd GET)
+        const cmd = cur.pending_cmd;
+        if (cmd && cmd !== lastHandledCmd) {
+          lastHandledCmd = cmd;
+          if (cmd === "__minehost_restart__") {
+            restartMCServer();
+          } else {
+            sendToConsole(cmd);
+          }
+        }
+        // pending_cmd already handled — clear it in the outgoing state
       } catch {}
     }
     gistRequest("PATCH", { files: { "state.json": { content: JSON.stringify(newState) } } }, null);
   });
 }
 
-function pollPendingCmd() {
-  if (!GIST_ID || !MINEHOST_TOKEN) return;
-  gistRequest("GET", null, (data) => {
-    if (!data?.files?.["state.json"]?.content) return;
-    try {
-      const state = JSON.parse(data.files["state.json"].content);
-      const cmd = state.pending_cmd;
-      if (cmd && cmd !== lastHandledCmd) {
-        lastHandledCmd = cmd;
-        state.pending_cmd = null;
-        gistRequest("PATCH", { files: { "state.json": { content: JSON.stringify(state) } } }, null);
-        if (cmd === "__minehost_restart__") {
-          restartMCServer();
-        } else {
-          sendToConsole(cmd);
-        }
-      }
-    } catch {}
-  });
-}
-
 if (GIST_ID && MINEHOST_TOKEN) {
   console.log(`[control] Gist sync enabled: ${GIST_ID}`);
-  setInterval(pushGistState, 3000);
-  setInterval(pollPendingCmd, 3000);
+  setInterval(syncGist, 5000);
 } else {
   console.log("[control] No MINEHOST_GIST_ID/MINEHOST_TOKEN — gist sync disabled");
 }
