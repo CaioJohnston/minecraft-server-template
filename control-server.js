@@ -14,6 +14,7 @@ const LOG_FILE = path.join(SERVER_DIR, "server.log");
 const CONFIG_FILE = path.join(SERVER_DIR, "minehost.json");
 const SERVER_IP_FILE = path.join(SCRIPT_DIR, ".server_ip");
 const PLAYIT_CLAIM_FILE = path.join(SCRIPT_DIR, ".playit_claim");
+const STAGE_FILE = path.join(SCRIPT_DIR, ".mc_stage");
 
 const { randomUUID } = require("crypto");
 const CMD_SECRET = process.env.MINEHOST_CMD_SECRET || randomUUID();
@@ -119,6 +120,16 @@ function getPlayitClaim() {
   }
 }
 
+function readStage() {
+  try {
+    if (!fs.existsSync(STAGE_FILE)) return null;
+    const s = fs.readFileSync(STAGE_FILE, "utf8").trim();
+    return s || null;
+  } catch {
+    return null;
+  }
+}
+
 function getRam() {
   try {
     const content = fs.readFileSync("/proc/meminfo", "utf8");
@@ -146,6 +157,11 @@ let totalLines        = 0;
 let lineCarry         = "";
 let sessionStartOffset = 0; // byte offset where this control-server instance started
 const tailListeners = new Set();
+
+// If server is already running when control-server starts, clear any stale stage file
+if (fs.existsSync(STAGE_FILE) && getServerRunning()) {
+  try { fs.unlinkSync(STAGE_FILE); } catch {}
+}
 
 // Initialize from current file state so first tick only picks up new lines
 if (fs.existsSync(LOG_FILE)) {
@@ -187,6 +203,12 @@ setInterval(() => {
   if (newLines.length === 0) return;
 
   totalLines += newLines.length;
+
+  // Clear startup stage once MC server reports ready
+  if (fs.existsSync(STAGE_FILE) && newLines.some((l) => /Done \(/.test(l))) {
+    try { fs.unlinkSync(STAGE_FILE); } catch {}
+  }
+
   for (const cb of tailListeners) cb(newLines);
 }, 500);
 
@@ -211,6 +233,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       running,
+      stage: readStage(),
       config,
       server_ip: getServerIP(),
       playit_claim: getPlayitClaim(),
@@ -453,7 +476,7 @@ function syncGist() {
   const cursor = totalLines;
   const newState = {
     running: getServerRunning(),
-    stage: null,
+    stage: readStage(),
     log,
     cursor,
     pending_cmd: null,

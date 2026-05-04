@@ -25,20 +25,9 @@ err() {
   echo "$msg" >&2
 }
 
-# Write startup stage to gist so the hub can show progress before logs flow
+# Write startup stage to file — control-server.js reads and broadcasts it
 set_stage() {
-  [ -z "${MINEHOST_GIST_ID:-}" ] || [ -z "${MINEHOST_TOKEN:-}" ] && return
-  local content="{\"stage\":\"$1\",\"running\":false,\"log\":[],\"cursor\":0}"
-  local escaped_content
-  escaped_content=$(printf '%s' "$content" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  curl -s -X PATCH "https://api.github.com/gists/$MINEHOST_GIST_ID" \
-    -H "Authorization: token $MINEHOST_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    -H "User-Agent: minehost-startup/1.0" \
-    -H "Content-Type: application/json" \
-    -d "{\"files\":{\"state.json\":{\"content\":\"$escaped_content\"}}}" \
-    > /dev/null 2>&1 &
+  echo "$1" > "$SCRIPT_DIR/.mc_stage"
 }
 
 # Returns required Java major version for a given MC version string.
@@ -76,12 +65,17 @@ require_java() {
   fi
   bin=$(find /usr/lib/jvm -maxdepth 3 -name "java" 2>/dev/null | grep -- "-${need}-" | head -1)
   if [ -z "$bin" ]; then
-    log "Java $current_major present but Java $need required — installing openjdk-${need}-jdk..." >&2
+    if [ -z "$current_major" ]; then
+      log "Java não encontrado — instalando openjdk-${need}-jdk..." >&2
+    else
+      log "Java $current_major encontrado mas Java $need necessário — instalando openjdk-${need}-jdk..." >&2
+    fi
     sudo apt-get update -qq > /dev/null 2>&1
     sudo apt-get install -y -qq "openjdk-${need}-jdk" > /dev/null 2>&1 \
-      || { err "Failed to install Java $need — using default Java (may fail)" >&2; echo "java"; return; }
+      || { err "Falha ao instalar Java $need — usando java padrão (pode falhar)" >&2; echo "java"; return; }
     bin=$(find /usr/lib/jvm -maxdepth 3 -name "java" 2>/dev/null | grep -- "-${need}-" | head -1)
   fi
+  log "Java $need pronto: ${bin:-java}" >&2
   echo "${bin:-java}"
 }
 
@@ -183,17 +177,11 @@ if ! command -v jq &>/dev/null; then
   sudo apt-get install -y -qq jq > /dev/null 2>&1 || err "Failed to install jq"
 fi
 
-if ! command -v java &>/dev/null; then
-  err "Java is not installed"
-  exit 1
-fi
-
 if ! command -v node &>/dev/null; then
   err "Node.js is not installed"
   exit 1
 fi
 
-log "Java: $(java -version 2>&1 | head -1)"
 log "Node: $(node --version)"
 
 # ── Read configuration ──────────────────────────────────────────────────────
@@ -298,12 +286,14 @@ case "$TYPE" in
         VER=$(curl -sL "$FAPI/versions/game?limit=1" | jq -r '.[0].version')
       fi
       LOADER=$(curl -sL "$FAPI/versions/$VER" | jq -r '.[0].loader.version')
-      set_stage "install"
-      log "Installing Fabric $VER with loader $LOADER"
-      curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
-      java -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction >> "$LOG" 2>&1
-      JAR_NAME="fabric-server-launch.jar"
+      JAVA_NEED=$(mc_java_ver "$VER")
+      JAVA_CMD=$(require_java "$JAVA_NEED")
       JAVA_MC_VER="$VER"
+      set_stage "install"
+      log "Installing Fabric $VER with loader $LOADER (Java $JAVA_NEED)"
+      curl -sL -o fabric-installer.jar "https://maven.fabricmc.net/net/fabricmc/fabric-installer/1.1.0/fabric-installer-1.1.0.jar"
+      "$JAVA_CMD" -jar fabric-installer.jar server -mcversion "$VER" -loader "$LOADER" -downloadMinecraft -nointeraction >> "$LOG" 2>&1
+      JAR_NAME="fabric-server-launch.jar"
       rm -f fabric-installer.jar 2>/dev/null || true
       echo "$JAVA_MC_VER" > "$SCRIPT_DIR/.mc_java_ver"
       log "Fabric $VER installed"
@@ -444,6 +434,7 @@ if [ "$JAVA_CMD" != "java" ]; then
   export PATH="$(dirname "$JAVA_CMD"):$PATH"
   log "Java path: $JAVA_CMD | JAVA_HOME: $JAVA_HOME"
 fi
+log "Java: $("$JAVA_CMD" -version 2>&1 | head -1)"
 
 # ── Accept EULA ─────────────────────────────────────────────────────────────
 # curseforge case writes eula.txt early (before start script detection); skip for others
