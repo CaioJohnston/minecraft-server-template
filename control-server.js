@@ -17,9 +17,11 @@ const PLAYIT_CLAIM_FILE = path.join(SCRIPT_DIR, ".playit_claim");
 
 // ── Utility functions ───────────────────────────────────────────────────────
 
-const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+// Strips ANSI/VT escape sequences including TUI codes (cursor positioning, alt screen, etc.)
+const ANSI_RE = /\x1b(?:\[[0-9;?]*[A-Za-z]|[()][AB0-2]|[>=])/g;
+const BOX_RE = /[┌┐└┘│─├┤┬┴┼╔╗╚╝║═]/g;
 function stripLine(l) {
-  return l.replace(ANSI_RE, "").replace(/\r/g, "").trim();
+  return l.replace(ANSI_RE, "").replace(BOX_RE, "").replace(/\r/g, "").trim();
 }
 
 function sendToConsole(text) {

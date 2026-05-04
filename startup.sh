@@ -472,17 +472,18 @@ _playit_extract_addr() {
 
 if [ -f "$PLAYIT_BIN" ] && [ -n "${MINEHOST_PLAYIT_TOKEN:-}" ]; then
   # ── Fluxo A: token presente — túnel estático estável ────────────────────────
+  # playit v0.17.1 is a TUI app — NEVER forward its raw output to $LOG (ANSI pollution).
+  # Grep works directly on the raw log since addresses/URLs are literal text in the ANSI soup.
   log "Starting playit.gg tunnel (authenticated)..."
   PLAYIT_LOG="$SCRIPT_DIR/.playit.log"
   (
     while true; do
-      rm -f "$SERVER_IP_FILE"
+      rm -f "$SERVER_IP_FILE" "$PLAYIT_CLAIM_FILE"
       > "$PLAYIT_LOG"
-      SECRET_KEY="$MINEHOST_PLAYIT_TOKEN" "$PLAYIT_BIN" > "$PLAYIT_LOG" 2>&1 &
+      # Try --secret flag (v1.x CLI) with SECRET_KEY env var fallback (Docker compat)
+      SECRET_KEY="$MINEHOST_PLAYIT_TOKEN" "$PLAYIT_BIN" --secret "$MINEHOST_PLAYIT_TOKEN" \
+        > "$PLAYIT_LOG" 2>&1 &
       PLAYIT_PID=$!
-      # Forward playit output to server log in real-time
-      tail -f "$PLAYIT_LOG" 2>/dev/null | sed 's/^/[playit] /' >> "$LOG" &
-      FWD_PID=$!
 
       for i in $(seq 1 30); do
         sleep 2
@@ -493,16 +494,36 @@ if [ -f "$PLAYIT_BIN" ] && [ -n "${MINEHOST_PLAYIT_TOKEN:-}" ]; then
           tmux send-keys -t mc "say [MineHost] Endereco: $ADDR" C-m 2>/dev/null || true
           break
         fi
+        # If playit ignored our secret and shows a claim URL instead, capture it
+        CLAIM_URL=$(grep -oP '(?:https?://)?playit\.gg/claim/[a-zA-Z0-9]+' "$PLAYIT_LOG" 2>/dev/null | head -1)
+        if [ -n "$CLAIM_URL" ] && [ ! -f "$PLAYIT_CLAIM_FILE" ]; then
+          [[ "$CLAIM_URL" != http* ]] && CLAIM_URL="https://$CLAIM_URL"
+          echo "$CLAIM_URL" > "$PLAYIT_CLAIM_FILE"
+          echo "[$(date '+%H:%M:%S')] [MINEHOST] playit requer autenticacao: $CLAIM_URL" >> "$LOG"
+          echo "[$(date '+%H:%M:%S')] [MINEHOST] Visite o link acima no painel MineHost para ativar o tunel" >> "$LOG"
+        fi
       done
 
-      if [ ! -f "$SERVER_IP_FILE" ]; then
-        echo "[$(date '+%H:%M:%S')] [MINEHOST] WARN: playit did not connect in 60s" >> "$LOG"
-        echo "[$(date '+%H:%M:%S')] [MINEHOST] playit log dump:" >> "$LOG"
-        cat "$PLAYIT_LOG" >> "$LOG" 2>/dev/null
+      if [ ! -f "$SERVER_IP_FILE" ] && [ ! -f "$PLAYIT_CLAIM_FILE" ]; then
+        echo "[$(date '+%H:%M:%S')] [MINEHOST] WARN: playit nao conectou em 60s — verifique o dashboard playit.gg" >> "$LOG"
+      fi
+
+      # If claim pending, keep watching for tunnel address until playit exits
+      if [ -f "$PLAYIT_CLAIM_FILE" ]; then
+        while kill -0 $PLAYIT_PID 2>/dev/null; do
+          sleep 3
+          ADDR=$(_playit_extract_addr "$PLAYIT_LOG")
+          if [ -n "$ADDR" ]; then
+            echo "$ADDR" > "$SERVER_IP_FILE"
+            rm -f "$PLAYIT_CLAIM_FILE"
+            echo "[$(date '+%H:%M:%S')] [MINEHOST] playit tunnel ativo: $ADDR" >> "$LOG"
+            tmux send-keys -t mc "say [MineHost] Endereco: $ADDR" C-m 2>/dev/null || true
+            break
+          fi
+        done
       fi
 
       wait $PLAYIT_PID 2>/dev/null
-      kill $FWD_PID 2>/dev/null || true
       rm -f "$SERVER_IP_FILE"
       echo "[$(date '+%H:%M:%S')] [MINEHOST] playit tunnel dropped — reconnecting in 5s..." >> "$LOG"
       sleep 5
@@ -519,9 +540,6 @@ elif [ -f "$PLAYIT_BIN" ]; then
       > "$PLAYIT_LOG"
       "$PLAYIT_BIN" > "$PLAYIT_LOG" 2>&1 &
       PLAYIT_PID=$!
-      # Forward playit output to server log in real-time
-      tail -f "$PLAYIT_LOG" 2>/dev/null | sed 's/^/[playit] /' >> "$LOG" &
-      FWD_PID=$!
 
       # Phase 1: wait up to 60s for claim URL or direct tunnel address
       TUNNELED=false
@@ -536,21 +554,17 @@ elif [ -f "$PLAYIT_BIN" ]; then
           TUNNELED=true
           break
         fi
-        # Broad regex: catches https/http, with or without scheme, any alphanumeric claim code
         CLAIM_URL=$(grep -oP '(?:https?://)?playit\.gg/claim/[a-zA-Z0-9]+' "$PLAYIT_LOG" 2>/dev/null | head -1)
         if [ -n "$CLAIM_URL" ] && [ ! -f "$PLAYIT_CLAIM_FILE" ]; then
-          # Ensure URL has scheme
           [[ "$CLAIM_URL" != http* ]] && CLAIM_URL="https://$CLAIM_URL"
           echo "$CLAIM_URL" > "$PLAYIT_CLAIM_FILE"
           echo "[$(date '+%H:%M:%S')] [MINEHOST] playit claim URL: $CLAIM_URL" >> "$LOG"
-          echo "[$(date '+%H:%M:%S')] [MINEHOST] Visite o link acima no painel do MineHost para ativar o tunel" >> "$LOG"
+          echo "[$(date '+%H:%M:%S')] [MINEHOST] Visite o link acima no painel MineHost para ativar o tunel" >> "$LOG"
         fi
       done
 
-      # If nothing found, dump playit log for diagnosis
       if [ "$TUNNELED" = false ] && [ ! -f "$PLAYIT_CLAIM_FILE" ]; then
-        echo "[$(date '+%H:%M:%S')] [MINEHOST] WARN: playit sem claim URL em 60s — log:" >> "$LOG"
-        cat "$PLAYIT_LOG" >> "$LOG" 2>/dev/null
+        echo "[$(date '+%H:%M:%S')] [MINEHOST] WARN: playit sem claim URL em 60s — reiniciando agente..." >> "$LOG"
       fi
 
       # Phase 2: if claim pending, keep watching until tunnel is established
@@ -569,7 +583,6 @@ elif [ -f "$PLAYIT_BIN" ]; then
       fi
 
       wait $PLAYIT_PID 2>/dev/null
-      kill $FWD_PID 2>/dev/null || true
       rm -f "$SERVER_IP_FILE"
       echo "[$(date '+%H:%M:%S')] [MINEHOST] playit encerrou — reiniciando em 5s..." >> "$LOG"
       sleep 5
