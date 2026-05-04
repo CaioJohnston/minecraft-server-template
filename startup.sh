@@ -77,6 +77,7 @@ require_java() {
   bin=$(find /usr/lib/jvm -maxdepth 3 -name "java" 2>/dev/null | grep -- "-${need}-" | head -1)
   if [ -z "$bin" ]; then
     log "Java $current_major present but Java $need required — installing openjdk-${need}-jdk..." >&2
+    sudo apt-get update -qq > /dev/null 2>&1
     sudo apt-get install -y -qq "openjdk-${need}-jdk" > /dev/null 2>&1 \
       || { err "Failed to install Java $need — using default Java (may fail)" >&2; echo "java"; return; }
     bin=$(find /usr/lib/jvm -maxdepth 3 -name "java" 2>/dev/null | grep -- "-${need}-" | head -1)

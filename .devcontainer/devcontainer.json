@@ -2,11 +2,6 @@
   "name": "MineHost Minecraft Server",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
   "features": {
-    "ghcr.io/devcontainers/features/java:1": {
-      "version": "25",
-      "installMaven": false,
-      "installGradle": false
-    },
     "ghcr.io/devcontainers/features/node:1": {
       "version": "20"
     }
