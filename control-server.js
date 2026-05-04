@@ -54,17 +54,6 @@ function getLastLines(n = 200) {
   return lines.slice(-n);
 }
 
-function getLastLinesWithTotal(n = 500) {
-  if (!fs.existsSync(LOG_FILE)) return { lines: [], total: 0 };
-  const content = fs.readFileSync(LOG_FILE, "utf8");
-  const rawAll = content.split(/\r?\n|\r/);
-  // Count total non-empty raw lines without stripLine (fast for large modpack logs)
-  let total = 0;
-  for (const l of rawAll) if (l.trim()) total++;
-  // Apply stripLine only to the last n*2 raw lines (buffer for empties after strip)
-  const lines = rawAll.slice(-(n * 2)).map(stripLine).filter((l) => l.length > 0).slice(-n);
-  return { lines, total };
-}
 
 function getConfig() {
   if (!fs.existsSync(CONFIG_FILE)) return null;
@@ -130,31 +119,56 @@ function getRam() {
   }
 }
 
-// ── WebSocket ───────────────────────────────────────────────────────────────
+// ── Shared tail reader ──────────────────────────────────────────────────────
+// Single interval replaces both checkNewOutput (WebSocket) and SSE sendInterval.
+// Reads only new bytes each tick — O(delta) regardless of total log size.
 
-const wss = { upgrade: null, on: null }; // Will be initialized after ws is installed
-let consoleClients = new Set();
+let tailOffset = 0;
+let tailSize   = 0;
+let totalLines = 0;
+let lineCarry  = "";
+const tailListeners = new Set();
 
-// Periodically poll for new console output and broadcast
-let lastLogLineCount = 0;
-
-function checkNewOutput() {
-  if (!fs.existsSync(LOG_FILE)) return;
-  const content = fs.readFileSync(LOG_FILE, "utf8");
-  const lines = content.split(/\r?\n|\r/).map(stripLine).filter((l) => l.length > 0);
-  if (lines.length > lastLogLineCount) {
-    const newLines = lines.slice(lastLogLineCount);
-    const text = newLines.join("\n") + "\n";
-    for (const client of consoleClients) {
-      if (client.readyState === 1 /* WebSocket.OPEN */) {
-        client.send(JSON.stringify({ type: "log", data: text }));
-      }
-    }
-    lastLogLineCount = lines.length;
-  }
+// Initialize from current file state so first tick only picks up new lines
+if (fs.existsSync(LOG_FILE)) {
+  try {
+    const stat = fs.statSync(LOG_FILE);
+    tailSize   = stat.size;
+    tailOffset = stat.size;
+    const content = fs.readFileSync(LOG_FILE, "utf8");
+    totalLines = content.split("\n").filter((l) => l.trim()).length;
+  } catch {}
 }
 
-setInterval(checkNewOutput, 500);
+setInterval(() => {
+  if (!fs.existsSync(LOG_FILE)) return;
+  const { size } = fs.statSync(LOG_FILE);
+
+  if (size < tailSize) {            // file truncated (server restart)
+    tailOffset = 0;
+    tailSize   = 0;
+    totalLines = 0;
+    lineCarry  = "";
+  }
+  if (size === tailSize) return;
+  tailSize = size;
+
+  const fd = fs.openSync(LOG_FILE, "r");
+  const buf = Buffer.allocUnsafe(size - tailOffset);
+  const bytesRead = fs.readSync(fd, buf, 0, buf.length, tailOffset);
+  fs.closeSync(fd);
+  tailOffset += bytesRead;
+
+  const text  = lineCarry + buf.toString("utf8");
+  const parts = text.split("\n");
+  lineCarry   = parts.pop();        // incomplete last line — carry to next tick
+
+  const newLines = parts.map(stripLine).filter((l) => l.length > 0);
+  if (newLines.length === 0) return;
+
+  totalLines += newLines.length;
+  for (const cb of tailListeners) cb(newLines);
+}, 500);
 
 // ── HTTP Server ─────────────────────────────────────────────────────────────
 
@@ -189,7 +203,8 @@ const server = http.createServer((req, res) => {
   // GET /log
   if (url.pathname === "/log" && req.method === "GET") {
     const n = parseInt(url.searchParams.get("lines") || "200");
-    const { lines: log, total } = getLastLinesWithTotal(n);
+    const log = getLastLines(n);
+    const total = totalLines;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ log, total }));
     return;
@@ -255,31 +270,15 @@ const server = http.createServer((req, res) => {
     });
 
     // Send existing log history immediately on connect
-    let lastIndex = 0;
-    if (fs.existsSync(LOG_FILE)) {
-      const content = fs.readFileSync(LOG_FILE, "utf8");
-      const lines = content.split("\n").map(stripLine).filter((l) => l.length > 0);
-      if (lines.length > 0) {
-        const historyStart = Math.max(0, lines.length - 500);
-        const history = lines.slice(historyStart).join("\n");
-        res.write(`data: ${JSON.stringify(history)}\n\n`);
-        lastIndex = lines.length;
-      }
+    const history = getLastLines(500);
+    if (history.length > 0) {
+      res.write(`data: ${JSON.stringify(history.join("\n"))}\n\n`);
     }
 
-    const sendInterval = setInterval(() => {
-      if (!fs.existsSync(LOG_FILE)) return;
-      const content = fs.readFileSync(LOG_FILE, "utf8");
-      const lines = content.split("\n").map(stripLine).filter((l) => l.length > 0);
-      if (lines.length > lastIndex) {
-        const newLines = lines.slice(lastIndex).join("\n");
-        res.write(`data: ${JSON.stringify(newLines)}\n\n`);
-        lastIndex = lines.length;
-      }
-    }, 500);
-
+    const onLines = (lines) => res.write(`data: ${JSON.stringify(lines.join("\n"))}\n\n`);
+    tailListeners.add(onLines);
     req.on("close", () => {
-      clearInterval(sendInterval);
+      tailListeners.delete(onLines);
       console.log("[control] SSE client disconnected");
     });
 
@@ -322,12 +321,18 @@ try {
   const _wss = new WebSocket.Server({ server });
   _wss.on("connection", (ws) => {
     console.log("[control] WebSocket client connected");
-    consoleClients.add(ws);
 
     const recent = getLastLines(50);
     if (recent.length > 0) {
       ws.send(JSON.stringify({ type: "log", data: recent.join("\n") + "\n" }));
     }
+
+    const onLines = (lines) => {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "log", data: lines.join("\n") + "\n" }));
+      }
+    };
+    tailListeners.add(onLines);
 
     ws.on("message", (data) => {
       try {
@@ -340,7 +345,7 @@ try {
 
     ws.on("close", () => {
       console.log("[control] WebSocket client disconnected");
-      consoleClients.delete(ws);
+      tailListeners.delete(onLines);
     });
   });
 } catch (e) {
@@ -424,7 +429,8 @@ function gistRequest(method, body, cb) {
 // Now: 2 calls/5s = 24/min from this process + ~12/min from frontend = 36/min total.
 function syncGist() {
   if (!GIST_ID || !MINEHOST_TOKEN) return;
-  const { lines: log, total: cursor } = getLastLinesWithTotal(500);
+  const log = getLastLines(500);
+  const cursor = totalLines;
   const newState = {
     running: getServerRunning(),
     stage: null,
