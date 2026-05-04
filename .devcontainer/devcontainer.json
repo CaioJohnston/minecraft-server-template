@@ -1,6 +1,6 @@
 {
   "name": "MineHost Minecraft Server",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
   "features": {
     "ghcr.io/devcontainers/features/java:1": {
       "version": "25",
@@ -11,7 +11,7 @@
       "version": "20"
     }
   },
-  "onCreateCommand": "sudo apt-get install -y tmux jq",
+  "onCreateCommand": "sudo apt-get update && sudo apt-get install -y tmux jq",
   "postStartCommand": "bash /workspaces/minecraft-server-template/startup.sh",
   "forwardPorts": [25565, 8081],
   "portsAttributes": {
