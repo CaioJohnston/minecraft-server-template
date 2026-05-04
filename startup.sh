@@ -432,21 +432,6 @@ if [ "$TYPE" != "curseforge" ]; then
   echo "eula=true" > eula.txt
 fi
 
-# Disable MC's "pause when empty" feature (added in 1.21.4 / 26.x).
-# When paused, the game loop AND stdin freeze — console commands stop working
-# and no new log lines are generated, making the console appear dead.
-# MC ignores unknown properties in server.properties, so safe for all versions.
-_disable_mc_pause() {
-  local sprop="$SERVER/server.properties"
-  [ -f "$sprop" ] || return
-  if grep -q "^pause-when-empty-seconds=" "$sprop" 2>/dev/null; then
-    sed -i 's/^pause-when-empty-seconds=.*/pause-when-empty-seconds=-1/' "$sprop"
-  else
-    echo "pause-when-empty-seconds=-1" >> "$sprop"
-  fi
-  log "Disabled pause-when-empty (server.properties)"
-}
-
 # ── Start server in tmux session ─────────────────────────────────────────────
 FIRST_RUN=false
 if [ ! -d "world" ] && [ "$JAR_NAME" != "run.sh" ]; then
@@ -459,9 +444,6 @@ if [ "$JAR_NAME" = "run.sh" ]; then
 else
   CMD="\"$JAVA_CMD\" $JVM -jar $JAR_NAME nogui >> $LOG 2>&1"
 fi
-
-# Apply pause fix before start (handles Codespace restarts with existing server.properties)
-_disable_mc_pause
 
 set_stage "starting"
 echo "$CMD" > "$SCRIPT_DIR/.mc_cmd"
@@ -477,8 +459,6 @@ if [ "$FIRST_RUN" = true ]; then
   tmux send-keys -t mc "stop" C-m 2>/dev/null || true
   sleep 5
   tmux kill-session -t mc 2>/dev/null || true
-  # Apply pause fix after first run generates server.properties, before restart
-  _disable_mc_pause
   log "World generation complete — restarting server"
   tmux new-session -d -s mc "$CMD" || { err "Failed to restart tmux session"; exit 1; }
 fi
