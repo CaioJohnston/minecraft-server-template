@@ -168,34 +168,45 @@ done
 
 # Force port 8081 to public so the frontend SSE probe can reach it without OAuth
 # devcontainer.json "visibility: public" is a VS Code hint only — not reliable
-log "Port visibility: CODESPACE_NAME=${CODESPACE_NAME:-EMPTY} gh=$(command -v gh 2>/dev/null || echo 'not found')"
+# Force port 8081 to public so SSE/control API is reachable from the browser.
+# GitHub auto-detects listening ports but defaults them to private.
+# We try two tokens: GITHUB_TOKEN (codespace-scoped, always available inside Codespace)
+# then MINEHOST_TOKEN as fallback. Two API calls: POST (create+public) then PATCH (update).
+log "Setting port 8081 to public (CODESPACE_NAME=${CODESPACE_NAME:-EMPTY})..."
 _PORT_SET=false
-# Path A: gh CLI (preferred — uses user's full OAuth token)
-if command -v gh &>/dev/null && [ -n "${CODESPACE_NAME:-}" ]; then
-  if gh codespace ports visibility 8081:public -c "$CODESPACE_NAME" 2>/dev/null; then
-    log "Port 8081 set to public via gh CLI"
-    _PORT_SET=true
-  else
-    log "gh codespace ports visibility failed (exit $?) — trying curl fallback"
+for _TOK in "${GITHUB_TOKEN:-}" "${MINEHOST_TOKEN:-}"; do
+  [ -z "$_TOK" ] || [ -z "${CODESPACE_NAME:-}" ] && continue
+  [ "$_PORT_SET" = true ] && break
+
+  # POST — explicitly forward the port as public (works even before GitHub auto-detects it)
+  _HTTP=$(curl -s -o /tmp/_port_resp.json -w "%{http_code}" -X POST \
+    -H "Authorization: Bearer $_TOK" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    -d '{"port":8081,"label":"MineHost Control","visibility":"public"}' \
+    "https://api.github.com/user/codespaces/$CODESPACE_NAME/ports" 2>/dev/null)
+  if [ "$_HTTP" = "200" ] || [ "$_HTTP" = "201" ] || [ "$_HTTP" = "204" ]; then
+    log "Port 8081 set to public via POST (HTTP $_HTTP)"
+    _PORT_SET=true; break
   fi
-fi
-# Path B: direct REST API with MINEHOST_TOKEN (works regardless of gh auth scope)
-if [ "$_PORT_SET" = false ] && [ -n "${MINEHOST_TOKEN:-}" ] && [ -n "${CODESPACE_NAME:-}" ]; then
-  _HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
-    -H "Authorization: Bearer $MINEHOST_TOKEN" \
+
+  # PATCH — update visibility of an already-detected forwarded port
+  _HTTP=$(curl -s -o /tmp/_port_resp.json -w "%{http_code}" -X PATCH \
+    -H "Authorization: Bearer $_TOK" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     -d '{"visibility":"public"}' \
-    "https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/8081/visibility" 2>/dev/null)
+    "https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/8081" 2>/dev/null)
   if [ "$_HTTP" = "200" ] || [ "$_HTTP" = "204" ]; then
-    log "Port 8081 set to public via REST API (HTTP $_HTTP)"
-    _PORT_SET=true
-  else
-    log "WARNING: REST API returned HTTP $_HTTP — port 8081 may stay private (SSE may not connect)"
+    log "Port 8081 set to public via PATCH (HTTP $_HTTP)"
+    _PORT_SET=true; break
   fi
-fi
-[ "$_PORT_SET" = false ] && log "WARNING: Could not set port 8081 to public — check CODESPACE_NAME and token scopes"
-unset _PORT_SET _HTTP
+  _BODY=$(cat /tmp/_port_resp.json 2>/dev/null | head -c 300)
+  log "Port API HTTP $_HTTP: $_BODY"
+  rm -f /tmp/_port_resp.json
+done
+[ "$_PORT_SET" = false ] && log "WARNING: Could not set port 8081 to public — SSE will retry via proxy"
+unset _PORT_SET _HTTP _TOK _BODY
 
 # ── Ensure dependencies ─────────────────────────────────────────────────────
 set_stage "deps"
