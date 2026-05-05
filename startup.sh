@@ -168,11 +168,34 @@ done
 
 # Force port 8081 to public so the frontend SSE probe can reach it without OAuth
 # devcontainer.json "visibility: public" is a VS Code hint only — not reliable
+log "Port visibility: CODESPACE_NAME=${CODESPACE_NAME:-EMPTY} gh=$(command -v gh 2>/dev/null || echo 'not found')"
+_PORT_SET=false
+# Path A: gh CLI (preferred — uses user's full OAuth token)
 if command -v gh &>/dev/null && [ -n "${CODESPACE_NAME:-}" ]; then
-  gh codespace ports visibility 8081:public -c "$CODESPACE_NAME" 2>/dev/null \
-    && log "Port 8081 set to public (SSE ready)" \
-    || log "WARNING: Could not set port 8081 to public — SSE may not connect from browser"
+  if gh codespace ports visibility 8081:public -c "$CODESPACE_NAME" 2>/dev/null; then
+    log "Port 8081 set to public via gh CLI"
+    _PORT_SET=true
+  else
+    log "gh codespace ports visibility failed (exit $?) — trying curl fallback"
+  fi
 fi
+# Path B: direct REST API with MINEHOST_TOKEN (works regardless of gh auth scope)
+if [ "$_PORT_SET" = false ] && [ -n "${MINEHOST_TOKEN:-}" ] && [ -n "${CODESPACE_NAME:-}" ]; then
+  _HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
+    -H "Authorization: Bearer $MINEHOST_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    -d '{"visibility":"public"}' \
+    "https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/8081/visibility" 2>/dev/null)
+  if [ "$_HTTP" = "200" ] || [ "$_HTTP" = "204" ]; then
+    log "Port 8081 set to public via REST API (HTTP $_HTTP)"
+    _PORT_SET=true
+  else
+    log "WARNING: REST API returned HTTP $_HTTP — port 8081 may stay private (SSE may not connect)"
+  fi
+fi
+[ "$_PORT_SET" = false ] && log "WARNING: Could not set port 8081 to public — check CODESPACE_NAME and token scopes"
+unset _PORT_SET _HTTP
 
 # ── Ensure dependencies ─────────────────────────────────────────────────────
 set_stage "deps"
