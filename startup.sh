@@ -166,6 +166,14 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
+# Force port 8081 to public so the frontend SSE probe can reach it without OAuth
+# devcontainer.json "visibility: public" is a VS Code hint only — not reliable
+if command -v gh &>/dev/null && [ -n "${CODESPACE_NAME:-}" ]; then
+  gh codespace ports visibility 8081:public -c "$CODESPACE_NAME" 2>/dev/null \
+    && log "Port 8081 set to public (SSE ready)" \
+    || log "WARNING: Could not set port 8081 to public — SSE may not connect from browser"
+fi
+
 # ── Ensure dependencies ─────────────────────────────────────────────────────
 set_stage "deps"
 if ! command -v tmux &>/dev/null; then
